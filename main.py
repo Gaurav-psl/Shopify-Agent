@@ -2,7 +2,7 @@ from fastify import FastAPI
 
 app = FastAPI(
     title = "Shopify AI Agent",
-    description = "Backend for Shopify AI"
+    description = "Backend for Shopify AI",
     version = "1.0.0"
 )
 
