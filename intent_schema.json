@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "description": "Intent classification schema for the Universal AI Agent Plugin (Shopify build). Each user message is classified into exactly one of these intents by the LLM classifier, then routed to the matching backend action.",
+
+  "intents": [
+    {
+      "name": "registration_login",
+      "description": "User wants to create an account, sign in, sign out, or recover access.",
+      "actions": [
+        { "name": "register", "requires_confirmation": true },
+        { "name": "login", "requires_confirmation": false },
+        { "name": "logout", "requires_confirmation": false },
+        { "name": "forgot_password", "requires_confirmation": false }
+      ],
+      "required_entities": ["email"],
+      "optional_entities": ["phone", "full_name"],
+      "example_utterances": [
+        "I want to create an account",
+        "Log me in",
+        "Sign me out",
+        "I forgot my password"
+      ]
+    },
+
+    {
+      "name": "order_tracking",
+      "description": "User wants the status or history of an existing order.",
+      "actions": [
+        { "name": "track_order", "requires_confirmation": false },
+        { "name": "list_recent_orders", "requires_confirmation": false }
+      ],
+      "required_entities": [],
+      "optional_entities": ["order_id", "order_number", "email"],
+      "example_utterances": [
+        "Where is my order?",
+        "Track order #1042",
+        "Show me my recent orders"
+      ]
+    },
+
+    {
+      "name": "cart_management",
+      "description": "User wants to view or change the contents of their cart.",
+      "actions": [
+        { "name": "add_item", "requires_confirmation": true },
+        { "name": "remove_item", "requires_confirmation": true },
+        { "name": "edit_quantity", "requires_confirmation": true },
+        { "name": "view_cart", "requires_confirmation": false },
+        { "name": "clear_cart", "requires_confirmation": true }
+      ],
+      "required_entities": ["product_name_or_id"],
+      "optional_entities": ["variant", "quantity"],
+      "example_utterances": [
+        "Add this to my cart",
+        "Remove the blue shirt from my cart",
+        "Change the quantity to 2",
+        "What's in my cart?",
+        "Empty my cart"
+      ]
+    },
+
+    {
+      "name": "warranty_claim",
+      "description": "User wants to file a warranty, return, or replacement claim on a purchased item.",
+      "actions": [
+        { "name": "submit_claim", "requires_confirmation": true },
+        { "name": "check_claim_status", "requires_confirmation": false }
+      ],
+      "required_entities": ["order_id", "issue_description"],
+      "optional_entities": ["product_name", "claim_type"],
+      "example_utterances": [
+        "This product arrived broken, I want a replacement",
+        "I'd like to return order #1042",
+        "What's the status of my warranty claim?"
+      ]
+    },
+
+    {
+      "name": "product_search",
+      "description": "User wants to find products, optionally filtered by price, category, or other attributes.",
+      "actions": [
+        { "name": "search_products", "requires_confirmation": false }
+      ],
+      "required_entities": [],
+      "optional_entities": ["query", "category", "price_min", "price_max", "color", "size", "sort_by"],
+      "example_utterances": [
+        "Show me running shoes under $50",
+        "Do you have this in blue?",
+        "What's your cheapest jacket?"
+      ]
+    },
+
+    {
+      "name": "policy_query",
+      "description": "User is asking about store policies rather than their own account or order.",
+      "actions": [
+        { "name": "answer_policy_question", "requires_confirmation": false }
+      ],
+      "required_entities": ["policy_type"],
+      "optional_entities": [],
+      "policy_types": ["refund_policy", "shipping_policy", "privacy_policy", "warranty_policy", "terms_of_service"],
+      "example_utterances": [
+        "What's your refund policy?",
+        "How long does shipping take?",
+        "Do you sell my data to anyone?"
+      ]
+    },
+
+    {
+      "name": "fallback",
+      "description": "Message doesn't clearly match any defined intent, or confidence is too low to act on. Agent should ask a clarifying question rather than guess.",
+      "actions": [
+        { "name": "clarify", "requires_confirmation": false }
+      ],
+      "required_entities": [],
+      "optional_entities": [],
+      "example_utterances": [
+        "hmm",
+        "can you help me with something",
+        "asdkfj"
+      ]
+    }
+  ],
+
+  "classification_output_format": {
+    "intent": "one of the intent names above",
+    "action": "one of that intent's action names",
+    "entities": "key-value object of any entities extracted from the message, kept in the language the user wrote them in",
+    "confidence": "float between 0 and 1",
+    "requires_confirmation": "boolean, copied from the matched action definition",
+    "language": "ISO 639-1 code of the language the user's message was written or spoken in, e.g. 'en', 'hi', 'pa', 'es', 'fr', 'ar'"
+  },
+
+  "confidence_threshold": 0.6,
+  "below_threshold_behavior": "route to fallback.clarify instead of guessing"
+}
