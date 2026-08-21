@@ -1,20 +1,13 @@
 """
 dashboard.py
 ------------
-The store owner's dashboard — separate from their Shopify login. After
-installing the app (via shopify_auth.py), they land here to:
+The store owner's dashboard, now backed by Appwrite. Same UX as before:
+signup/login (bcrypt-hashed passwords, unchanged — that logic doesn't
+depend on the database choice), then customize the widget's name,
+greeting, and icon.
 
-  1. Create a login (signup) tied to their store, or log in on return visits
-  2. Customize the chatbot: display name, title, description, and button
-     icon (custom upload OR a preset icon recolored to their theme_color)
-
-Sessions are simple signed cookies (Starlette's SessionMiddleware — add
-that middleware in main.py). Passwords are hashed with bcrypt via
-passlib.
-
-This uses plain inline HTML so the whole dashboard is a single file with
-no extra template setup required. Swap in Jinja2 templates / a proper
-frontend later if you want a nicer UI — the routes and logic stay the same.
+Sessions still use Starlette's SessionMiddleware (signed cookies) —
+that's independent of the database too.
 """
 
 import os
@@ -23,11 +16,9 @@ import uuid
 
 from fastapi import APIRouter, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
-from passlib.hash import bcrypt
-from sqlalchemy.orm import Session
+import bcrypt
 
-from database import SessionLocal
-from models import Store, DashboardUser, AgentCustomization
+import repository_appwrite as repo
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -55,11 +46,14 @@ def _page(title: str, body: str) -> str:
 <body>{body}</body></html>"""
 
 
-def _get_session_store(request: Request, db: Session) -> Store | None:
+def _get_session_store(request: Request) -> dict | None:
     store_id = request.session.get("store_id")
     if not store_id:
         return None
-    return db.query(Store).filter_by(id=store_id, uninstalled=False).first()
+    store = repo.get_store_by_id(store_id)
+    if store and not store.get("uninstalled"):
+        return store
+    return None
 
 
 # --------------------------------------------------------------------
@@ -84,26 +78,21 @@ async def signup_form(request: Request):
 
 @router.post("/signup")
 async def signup_submit(request: Request, shop: str = Form(...), email: str = Form(...), password: str = Form(...)):
-    db: Session = SessionLocal()
-    try:
-        store = db.query(Store).filter_by(shop_domain=shop, uninstalled=False).first()
-        if not store:
-            return PlainTextResponse("Store not found — please reinstall the app.", status_code=404)
-        if store.dashboard_user:
-            return RedirectResponse(f"/dashboard/login?shop={shop}", status_code=303)
-        if db.query(DashboardUser).filter_by(email=email).first():
-            return HTMLResponse(_page("Set up dashboard", '<p class="error">That email is already in use.</p><a href="javascript:history.back()">Back</a>'))
+    store = repo.get_store(shop)
+    if not store:
+        return PlainTextResponse("Store not found — please reinstall the app.", status_code=404)
 
-        user = DashboardUser(store_id=store.id, email=email, password_hash=bcrypt.hash(password))
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+    if repo.has_dashboard_user(store["$id"]):
+        return RedirectResponse(f"/dashboard/login?shop={shop}", status_code=303)
 
-        request.session["store_id"] = store.id
-        request.session["user_id"] = user.id
-        return RedirectResponse("/dashboard", status_code=303)
-    finally:
-        db.close()
+    if repo.get_dashboard_user_by_email(email):
+        return HTMLResponse(_page("Set up dashboard", '<p class="error">That email is already in use.</p><a href="javascript:history.back()">Back</a>'))
+
+    user = repo.create_dashboard_user(store["$id"], email, bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode())
+
+    request.session["store_id"] = store["$id"]
+    request.session["user_id"] = user["$id"]
+    return RedirectResponse("/dashboard", status_code=303)
 
 
 # --------------------------------------------------------------------
@@ -125,17 +114,17 @@ async def login_form(request: Request):
 
 @router.post("/login")
 async def login_submit(request: Request, email: str = Form(...), password: str = Form(...)):
-    db: Session = SessionLocal()
-    try:
-        user = db.query(DashboardUser).filter_by(email=email).first()
-        if not user or not bcrypt.verify(password, user.password_hash):
-            return HTMLResponse(_page("Log in", '<p class="error">Invalid email or password.</p><a href="/dashboard/login">Try again</a>'))
+    user = repo.get_dashboard_user_by_email(email)
+    if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        return HTMLResponse(_page("Log in", '<p class="error">Invalid email or password.</p><a href="/dashboard/login">Try again</a>'))
 
-        request.session["store_id"] = user.store_id
-        request.session["user_id"] = user.id
-        return RedirectResponse("/dashboard", status_code=303)
-    finally:
-        db.close()
+    # user["store"] is the related Store document, resolved automatically
+    # by Appwrite's relationship attribute — no separate query needed.
+    store_id = user["store"]["$id"] if isinstance(user["store"], dict) else user["store"]
+
+    request.session["store_id"] = store_id
+    request.session["user_id"] = user["$id"]
+    return RedirectResponse("/dashboard", status_code=303)
 
 
 @router.get("/logout")
@@ -149,70 +138,58 @@ async def logout(request: Request):
 # --------------------------------------------------------------------
 @router.get("", response_class=HTMLResponse)
 async def dashboard_home(request: Request):
-    db: Session = SessionLocal()
-    try:
-        store = _get_session_store(request, db)
-        if not store:
-            return RedirectResponse("/dashboard/login", status_code=303)
+    store = _get_session_store(request)
+    if not store:
+        return RedirectResponse("/dashboard/login", status_code=303)
 
-        cfg = db.query(AgentCustomization).filter_by(store_id=store.id).first()
-        if not cfg:
-            cfg = AgentCustomization(store_id=store.id)
-            db.add(cfg)
-            db.commit()
-            db.refresh(cfg)
+    cfg = repo.ensure_customization(store["$id"])
 
-        preset_checked = "checked" if cfg.icon_type == "preset" else ""
-        custom_checked = "checked" if cfg.icon_type == "custom" else ""
-        preview_img = f'<img src="{cfg.custom_icon_url}" style="width:40px;height:40px;border-radius:50%;">' if cfg.custom_icon_url else ""
+    preset_checked = "checked" if cfg.get("icon_type", "preset") == "preset" else ""
+    custom_checked = "checked" if cfg.get("icon_type") == "custom" else ""
+    preview_img = f'<img src="{cfg["custom_icon_url"]}" style="width:40px;height:40px;border-radius:50%;">' if cfg.get("custom_icon_url") else ""
 
-        body = f"""
-        <h1>Chatbot settings — {store.shop_domain}</h1>
-        <p class="hint"><a href="/dashboard/logout">Log out</a></p>
+    body = f"""
+    <h1>Chatbot settings — {store['shop_domain']}</h1>
+    <p class="hint"><a href="/dashboard/logout">Log out</a></p>
 
-        <form method="post" action="/dashboard/customize" enctype="multipart/form-data">
-          <label>Agent name (shown in the widget header)
-            <input type="text" name="agent_name" value="{cfg.agent_name}" maxlength="100">
-          </label>
-          <label>Greeting title (first message shown to shoppers)
-            <input type="text" name="agent_title" value="{cfg.agent_title}" maxlength="150">
-          </label>
-          <label>Description (internal notes, not shown to shoppers)
-            <textarea name="agent_description" maxlength="500">{cfg.agent_description}</textarea>
-          </label>
+    <form method="post" action="/dashboard/customize" enctype="multipart/form-data">
+      <label>Agent name (shown in the widget header)
+        <input type="text" name="agent_name" value="{cfg.get('agent_name', '')}" maxlength="100">
+      </label>
+      <label>Greeting title (first message shown to shoppers)
+        <input type="text" name="agent_title" value="{cfg.get('agent_title', '')}" maxlength="150">
+      </label>
 
-          <label>Button icon</label>
-          <div class="row">
-            <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
-              <input type="radio" name="icon_type" value="preset" {preset_checked}> Preset icon (recolored)
-            </label>
-            <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
-              <input type="radio" name="icon_type" value="custom" {custom_checked}> Custom image
-            </label>
-          </div>
+      <label>Button icon</label>
+      <div class="row">
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+          <input type="radio" name="icon_type" value="preset" {preset_checked}> Preset icon (recolored)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+          <input type="radio" name="icon_type" value="custom" {custom_checked}> Custom image
+        </label>
+      </div>
 
-          <label>Theme color (used when "Preset icon" is selected)
-            <input type="text" name="theme_color" value="{cfg.theme_color}" placeholder="#2b2b2b">
-          </label>
+      <label>Theme color (used when "Preset icon" is selected)
+        <input type="text" name="theme_color" value="{cfg.get('theme_color', '#2b2b2b')}" placeholder="#2b2b2b">
+      </label>
 
-          <label>Custom icon image (used when "Custom image" is selected)
-            {preview_img}
-            <input type="file" name="custom_icon" accept="image/*">
-          </label>
+      <label>Custom icon image (used when "Custom image" is selected)
+        {preview_img}
+        <input type="file" name="custom_icon" accept="image/*">
+      </label>
 
-          <button type="submit">Save changes</button>
-        </form>
+      <button type="submit">Save changes</button>
+    </form>
 
-        <hr style="margin-top:30px;">
-        <h1 style="font-size:15px;">Install snippet</h1>
-        <p class="hint">Add this once to your theme (before &lt;/body&gt;):</p>
-        <code style="display:block;background:#f5f5f5;padding:10px;border-radius:8px;font-size:11px;word-break:break-all;">
-          &lt;script src="{request.url.scheme}://{request.url.netloc}/widget.js" data-shop="{store.shop_domain}" defer&gt;&lt;/script&gt;
-        </code>
-        """
-        return HTMLResponse(_page("Dashboard", body))
-    finally:
-        db.close()
+    <hr style="margin-top:30px;">
+    <h1 style="font-size:15px;">Install snippet</h1>
+    <p class="hint">Add this once to your theme (before &lt;/body&gt;):</p>
+    <code style="display:block;background:#f5f5f5;padding:10px;border-radius:8px;font-size:11px;word-break:break-all;">
+      &lt;script src="{request.url.scheme}://{request.url.netloc}/widget.js" data-shop="{store['shop_domain']}" defer&gt;&lt;/script&gt;
+    </code>
+    """
+    return HTMLResponse(_page("Dashboard", body))
 
 
 @router.post("/customize")
@@ -220,33 +197,28 @@ async def customize_submit(
     request: Request,
     agent_name: str = Form(...),
     agent_title: str = Form(...),
-    agent_description: str = Form(""),
     icon_type: str = Form("preset"),
     theme_color: str = Form("#2b2b2b"),
     custom_icon: UploadFile | None = File(None),
 ):
-    db: Session = SessionLocal()
-    try:
-        store = _get_session_store(request, db)
-        if not store:
-            return RedirectResponse("/dashboard/login", status_code=303)
+    store = _get_session_store(request)
+    if not store:
+        return RedirectResponse("/dashboard/login", status_code=303)
 
-        cfg = db.query(AgentCustomization).filter_by(store_id=store.id).first()
-        cfg.agent_name = agent_name.strip() or "AI Assistant"
-        cfg.agent_title = agent_title.strip() or "How can I help you today?"
-        cfg.agent_description = agent_description.strip()
-        cfg.icon_type = icon_type if icon_type in ("preset", "custom") else "preset"
-        cfg.theme_color = theme_color.strip() or "#2b2b2b"
+    updates = {
+        "agent_name": agent_name.strip() or "AI Assistant",
+        "agent_title": agent_title.strip() or "How can I help you today?",
+        "icon_type": icon_type if icon_type in ("preset", "custom") else "preset",
+        "theme_color": theme_color.strip() or "#2b2b2b",
+    }
 
-        if custom_icon is not None and custom_icon.filename:
-            ext = os.path.splitext(custom_icon.filename)[1] or ".png"
-            filename = f"{store.id}_{uuid.uuid4().hex}{ext}"
-            filepath = os.path.join(UPLOAD_DIR, filename)
-            with open(filepath, "wb") as f:
-                shutil.copyfileobj(custom_icon.file, f)
-            cfg.custom_icon_url = f"/{filepath}"
+    if custom_icon is not None and custom_icon.filename:
+        ext = os.path.splitext(custom_icon.filename)[1] or ".png"
+        filename = f"{store['$id']}_{uuid.uuid4().hex}{ext}"
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        with open(filepath, "wb") as f:
+            shutil.copyfileobj(custom_icon.file, f)
+        updates["custom_icon_url"] = f"/{filepath}"
 
-        db.commit()
-        return RedirectResponse("/dashboard", status_code=303)
-    finally:
-        db.close()
+    repo.update_customization(store["$id"], **updates)
+    return RedirectResponse("/dashboard", status_code=303)

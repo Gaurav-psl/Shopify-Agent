@@ -1,48 +1,21 @@
 """
 shopify_auth.py
 ----------------
-The Shopify OAuth "install app" flow — rebuilt from your old main.py's
-auth logic (make_state/verify_state/verify_hmac are carried over almost
-unchanged), with two upgrades:
-
-1. Access tokens are saved to the DATABASE (models.Store), not an
-   in-memory dict. Your old `token_store = {}` was wiped every time
-   Render restarted the dyno, silently "uninstalling" every store from
-   your app's point of view.
-2. After a successful install, the merchant is handed off to your
-   dashboard (signup for first-time installs, login for returning ones)
-   instead of just seeing a static "installed successfully" text page.
+The Shopify OAuth "install app" flow — same OAuth logic as before
+(make_state/verify_state/verify_hmac unchanged), now backed by Appwrite
+instead of SQLAlchemy. Access tokens live in the Appwrite `stores`
+collection rather than a Postgres table or an in-memory dict.
 
 Three routes, same as before:
 
-GET /                (Shopify sends merchants here — your "App URL" in
-                       the Partner Dashboard — when they click Install,
-                       or when they open the app from their admin)
-    Reads ?shop=xxx.myshopify.com. If we already have a valid token for
-    that shop, skip straight to the dashboard. Otherwise start OAuth.
-
-GET /auth?shop=xxx.myshopify.com
-    Redirects to Shopify's permission-grant screen for the scopes this
-    app needs (SHOPIFY_SCOPES).
-
-GET /auth/callback
-    Shopify redirects back here after approval. Verifies state (CSRF)
-    and HMAC (request really came from Shopify), exchanges the temporary
-    `code` for a permanent Admin API access token, and saves it.
-
-------------------------------------------------------------------------
-Required environment variables
-------------------------------------------------------------------------
-SHOPIFY_API_KEY       - Client ID, from the Partner Dashboard
-SHOPIFY_API_SECRET    - Client secret, from the Partner Dashboard
-SHOPIFY_SCOPES        - comma-separated, e.g.
-                        "read_products,read_orders,write_orders,read_customers"
-APP_URL               - your deployed app's public https URL, e.g.
-                        "https://your-app.onrender.com"  (no trailing slash)
-                        NOTE: your old file called this HOST — renamed to
-                        APP_URL to match the rest of the upgraded repo.
-                        Update your Render env var name if needed (or add
-                        both, see the compatibility shim below).
+GET /                Shopify sends merchants here. Reads ?shop=xxx. If we
+                      already have a valid token, skip to dashboard.
+                      Otherwise start OAuth.
+GET /auth             Redirects to Shopify's permission-grant screen.
+GET /auth/callback    Shopify redirects back with a temporary `code`;
+                      verify state + HMAC, exchange for an access token,
+                      save it, then route to signup (new store) or
+                      login (returning store).
 """
 
 import base64
@@ -55,10 +28,8 @@ import urllib.parse
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, PlainTextResponse
-from sqlalchemy.orm import Session
 
-from database import SessionLocal
-from models import Store, AgentCustomization
+import repository_appwrite as repo
 
 router = APIRouter(tags=["shopify-auth"])
 
@@ -66,20 +37,16 @@ SHOPIFY_API_KEY = (os.environ.get("SHOPIFY_API_KEY") or "").strip()
 SHOPIFY_API_SECRET = (os.environ.get("SHOPIFY_API_SECRET") or "").strip()
 SHOPIFY_SCOPES = (
     os.environ.get("SHOPIFY_SCOPES")
-    or os.environ.get("SCOPES")  # falls back to your old var name if still set
+    or os.environ.get("SCOPES")
     or "read_products,read_orders,write_orders,read_customers"
 ).strip()
-
-# Compatibility shim: your old Render env var was called HOST — this
-# accepts either name so you don't have to rename anything on Render
-# right now. New installs should standardize on APP_URL.
 APP_URL = (os.environ.get("APP_URL") or os.environ.get("HOST") or "http://localhost:8000").strip().rstrip("/")
 
 STATE_MAX_AGE_SECONDS = 600
 
 
 # --------------------------------------------------------------------
-# Carried over from your old main.py, unchanged.
+# Carried over unchanged from the version we debugged together.
 # --------------------------------------------------------------------
 def make_state(shop: str) -> str:
     timestamp = str(int(time.time()))
@@ -123,16 +90,12 @@ def verify_hmac(params: dict) -> bool:
 
 
 # --------------------------------------------------------------------
-# Entry point — Shopify sends merchants here ("Application URL" in the
-# Partner Dashboard). Decide whether they need OAuth or can go straight
-# to the dashboard.
+# Entry point
 # --------------------------------------------------------------------
 @router.get("/")
 async def app_entry(request: Request):
     shop = request.query_params.get("shop")
     if not shop:
-        # Not opened from Shopify — show a plain status page instead of
-        # erroring, so your own health checks / manual visits still work.
         return {
             "status": "running",
             "message": "Shopify AI Agent backend is running.",
@@ -143,13 +106,8 @@ async def app_entry(request: Request):
             },
         }
 
-    db: Session = SessionLocal()
-    try:
-        store = db.query(Store).filter_by(shop_domain=shop, uninstalled=False).first()
-    finally:
-        db.close()
-
-    if store and store.access_token:
+    store = repo.get_store(shop)
+    if store and store.get("access_token"):
         return RedirectResponse(f"/dashboard?shop={urllib.parse.quote(shop)}")
 
     return RedirectResponse(f"/auth?shop={urllib.parse.quote(shop)}")
@@ -161,7 +119,7 @@ def health():
 
 
 # --------------------------------------------------------------------
-# Step 1: redirect the merchant to Shopify's permission screen
+# Step 1: redirect to Shopify's permission screen
 # --------------------------------------------------------------------
 @router.get("/auth")
 def start_auth(shop: str):
@@ -188,7 +146,7 @@ def start_auth(shop: str):
 
 
 # --------------------------------------------------------------------
-# Step 2: Shopify redirects back here with a temporary `code`
+# Step 2: Shopify redirects back with a temporary `code`
 # --------------------------------------------------------------------
 @router.get("/auth/callback")
 async def auth_callback(request: Request):
@@ -226,31 +184,9 @@ async def auth_callback(request: Request):
     granted_scopes = data.get("scope", "")
     print(f"Installed on {shop}. Scopes: {granted_scopes}. Token starts with: {access_token[:10]}...")
 
-    # --- This is the upgrade over your old file: save to the DB instead
-    # --- of an in-memory dict, and figure out whether this is a brand
-    # --- new store (needs dashboard signup) or a reinstall (goes to login).
-    db: Session = SessionLocal()
-    try:
-        store = db.query(Store).filter_by(shop_domain=shop).first()
-        if store:
-            store.access_token = access_token
-            store.scopes = granted_scopes
-            store.uninstalled = False
-        else:
-            store = Store(shop_domain=shop, access_token=access_token, scopes=granted_scopes)
-            db.add(store)
-        db.commit()
-        db.refresh(store)
-
-        # Make sure a customization row exists so the dashboard has
-        # sensible defaults to show right away.
-        if not db.query(AgentCustomization).filter_by(store_id=store.id).first():
-            db.add(AgentCustomization(store_id=store.id))
-            db.commit()
-
-        is_new_store = store.dashboard_user is None
-    finally:
-        db.close()
+    store = repo.upsert_shop(shop, access_token, granted_scopes)
+    repo.ensure_customization(store["$id"])
+    is_new_store = not repo.has_dashboard_user(store["$id"])
 
     destination = (
         f"/dashboard/signup?shop={urllib.parse.quote(shop)}"
