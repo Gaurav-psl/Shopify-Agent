@@ -11,8 +11,7 @@ Run: python setup_collections.py
 from appwrite_client import databases, DATABASE_ID, STORES_COLLECTION, FLOWS_COLLECTION, REQUEST_LOGS_COLLECTION, CUSTOMIZATIONS_COLLECTION, DASHBOARD_USERS_COLLECTION
 from appwrite.permission import Permission
 from appwrite.role import Role
-from appwrite.enums.relationship_type import RelationshipType
-from appwrite.enums.databases_index_type import DatabasesIndexType
+from appwrite.enums import RelationshipType, IndexType
 
 def setup():
     # ---- Database ----
@@ -33,7 +32,7 @@ def setup():
     databases.create_boolean_attribute(DATABASE_ID, STORES_COLLECTION, "uninstalled", required=False, default=False)
     databases.create_datetime_attribute(DATABASE_ID, STORES_COLLECTION, "installed_at", required=False)
     # A unique index — Appwrite's equivalent of unique=True on a SQLAlchemy column
-    databases.create_index(DATABASE_ID, STORES_COLLECTION, key="unique_shop_domain", type=DatabasesIndexType.UNIQUE, attributes=["shop_domain"])
+    databases.create_index(DATABASE_ID, STORES_COLLECTION, key="unique_shop_domain", type=IndexType.UNIQUE, attributes=["shop_domain"])
 
     # ---- Flows collection ----
     databases.create_collection(database_id=DATABASE_ID, collection_id=FLOWS_COLLECTION, name="Flows", permissions=[])
@@ -63,7 +62,7 @@ def setup():
     databases.create_collection(database_id=DATABASE_ID, collection_id=DASHBOARD_USERS_COLLECTION, name="DashboardUsers", permissions=[])
     databases.create_email_attribute(DATABASE_ID, DASHBOARD_USERS_COLLECTION, "email", required=True)
     databases.create_string_attribute(DATABASE_ID, DASHBOARD_USERS_COLLECTION, "password_hash", size=255, required=True)
-    databases.create_index(DATABASE_ID, DASHBOARD_USERS_COLLECTION, key="unique_email", type=DatabasesIndexType.UNIQUE, attributes=["email"])
+    databases.create_index(DATABASE_ID, DASHBOARD_USERS_COLLECTION, key="unique_email", type=IndexType.UNIQUE, attributes=["email"])
 
     # ---- Relationships — Appwrite's version of a foreign key ----
     # These link Flows, RequestLogs, and Customizations each back to a
