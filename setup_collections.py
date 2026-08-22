@@ -11,7 +11,8 @@ Run: python setup_collections.py
 from appwrite_client import databases, DATABASE_ID, STORES_COLLECTION, FLOWS_COLLECTION, REQUEST_LOGS_COLLECTION, CUSTOMIZATIONS_COLLECTION, DASHBOARD_USERS_COLLECTION
 from appwrite.permission import Permission
 from appwrite.role import Role
-from appwrite.enums import RelationshipType, IndexType
+from appwrite.enums.relationship_type import RelationshipType
+from appwrite.enums.index_type import IndexType
 
 def setup():
     # ---- Database ----
