@@ -4,6 +4,37 @@ repository_appwrite.py
 Same function names and signatures as the SQLAlchemy repository.py, so
 main.py's route handlers don't need to change — only the import line
 does: `import repository_appwrite as repo` instead of `import repository`.
+
+NEW IN THIS VERSION (to support the rich "RenderLink" dashboard UI):
+  - ensure_customization() now also seeds `instructions`, `status`,
+    and `widget_position` alongside the existing agent_name/agent_title/
+    icon_type/theme_color/custom_icon_url fields.
+  - get_dashboard_user_by_id() — needed because the dashboard now shows
+    the logged-in owner's email in the sidebar/topbar.
+  - Features, Store Info, FAQs, and Feedback: new collections + CRUD
+    functions, mirroring the existing ensure_customization/
+    update_customization pattern.
+
+>>> ACTION NEEDED IN appwrite_client.py <<<
+Add these four new collection ID constants (create the matching
+collections in your Appwrite console first) and import them below:
+
+    FEATURES_COLLECTION       — one doc per store. Boolean attributes:
+                                 product_search, recommendations,
+                                 product_filtering, warranty,
+                                 cart_editing, returns, track_orders.
+                                 Plus a `store` relationship/string attr.
+    STORE_INFO_COLLECTION     — one doc per store. String attributes:
+                                 business_name, support_email, timezone.
+                                 Plus a `store` relationship/string attr.
+    FAQS_COLLECTION           — many docs per store. String attributes:
+                                 question, answer. Plus `store`.
+    FEEDBACK_COLLECTION       — many docs per store (write-mostly).
+                                 String attribute: message. Plus `store`.
+
+Also add `instructions` (string, large), `status` (string, default
+"active"), and `widget_position` (string, default "bottom-right") as
+attributes on your existing CUSTOMIZATIONS_COLLECTION.
 """
 
 import json
@@ -13,6 +44,7 @@ from appwrite.exception import AppwriteException
 from appwrite_client import (
     databases, DATABASE_ID, STORES_COLLECTION, FLOWS_COLLECTION,
     REQUEST_LOGS_COLLECTION, CUSTOMIZATIONS_COLLECTION, DASHBOARD_USERS_COLLECTION,
+    FEATURES_COLLECTION, STORE_INFO_COLLECTION, FAQS_COLLECTION, FEEDBACK_COLLECTION,
 )
 
 
@@ -154,6 +186,13 @@ def get_dashboard_user_by_email(email: str) -> dict | None:
     return result["documents"][0] if result["documents"] else None
 
 
+def get_dashboard_user_by_id(user_id: str) -> dict | None:
+    try:
+        return databases.get_document(DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id)
+    except AppwriteException:
+        return None
+
+
 def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict:
     normalized = (email or "").strip().lower()
     return databases.create_document(
@@ -162,7 +201,7 @@ def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict
     )
 
 
-# --- Agent customization ---
+# --- Agent customization (name, welcome/title, instructions, status, icon, theme, position) ---
 
 def get_customization(store_id: str) -> dict | None:
     result = databases.list_documents(
@@ -181,10 +220,125 @@ def ensure_customization(store_id: str) -> dict:
         return existing
     return databases.create_document(
         DATABASE_ID, CUSTOMIZATIONS_COLLECTION, ID.unique(),
-        data={"store": store_id, "agent_name": "AI Assistant", "agent_title": "How can I help you today?", "theme_color": "#2b2b2b"},
+        data={
+            "store": store_id,
+            "agent_name": "AI Assistant",
+            "agent_title": "How can I help you today?",
+            "theme_color": "#2b2b2b",
+            "icon_type": "preset",
+            "instructions": (
+                "You are a helpful AI shopping assistant for this store. "
+                "Be friendly, helpful and concise. Always try to provide "
+                "accurate information about products, orders, shipping, "
+                "returns and store policies."
+            ),
+            "status": "active",
+            "widget_position": "bottom-right",
+        },
     )
 
 
 def update_customization(store_id: str, **fields) -> dict:
     existing = ensure_customization(store_id)
     return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fields)
+
+
+# --- Features (per-store toggles for what the AI agent can do) ---
+
+_DEFAULT_FEATURES = {
+    "product_search": True,
+    "recommendations": True,
+    "product_filtering": True,
+    "warranty": True,
+    "cart_editing": True,
+    "returns": False,
+    "track_orders": True,
+}
+
+
+def get_features(store_id: str) -> dict | None:
+    result = databases.list_documents(
+        DATABASE_ID, FEATURES_COLLECTION,
+        queries=[Query.equal("store", store_id)],
+    )
+    return result["documents"][0] if result["documents"] else None
+
+
+def ensure_features(store_id: str) -> dict:
+    existing = get_features(store_id)
+    if existing:
+        return existing
+    return databases.create_document(
+        DATABASE_ID, FEATURES_COLLECTION, ID.unique(),
+        data={"store": store_id, **_DEFAULT_FEATURES},
+    )
+
+
+def update_features(store_id: str, **fields) -> dict:
+    existing = ensure_features(store_id)
+    return databases.update_document(DATABASE_ID, FEATURES_COLLECTION, existing["$id"], data=fields)
+
+
+# --- Store info (business name, support email, timezone) ---
+
+def get_store_info(store_id: str) -> dict | None:
+    result = databases.list_documents(
+        DATABASE_ID, STORE_INFO_COLLECTION,
+        queries=[Query.equal("store", store_id)],
+    )
+    return result["documents"][0] if result["documents"] else None
+
+
+def ensure_store_info(store_id: str) -> dict:
+    existing = get_store_info(store_id)
+    if existing:
+        return existing
+    return databases.create_document(
+        DATABASE_ID, STORE_INFO_COLLECTION, ID.unique(),
+        data={"store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"},
+    )
+
+
+def update_store_info(store_id: str, **fields) -> dict:
+    existing = ensure_store_info(store_id)
+    return databases.update_document(DATABASE_ID, STORE_INFO_COLLECTION, existing["$id"], data=fields)
+
+
+# --- Knowledge base / FAQs ---
+
+def list_faqs(store_id: str) -> list[dict]:
+    result = databases.list_documents(
+        DATABASE_ID, FAQS_COLLECTION,
+        queries=[Query.equal("store", store_id), Query.order_asc("$createdAt")],
+    )
+    return result["documents"]
+
+
+def add_faq(store_id: str, question: str, answer: str) -> dict:
+    return databases.create_document(
+        DATABASE_ID, FAQS_COLLECTION, ID.unique(),
+        data={"store": store_id, "question": question, "answer": answer},
+    )
+
+
+def delete_faq(store_id: str, faq_id: str) -> bool:
+    """Deletes a FAQ only if it actually belongs to this store, so one
+    store owner can't delete another store's FAQ by guessing an id."""
+    try:
+        doc = databases.get_document(DATABASE_ID, FAQS_COLLECTION, faq_id)
+    except AppwriteException:
+        return False
+    owner_id = doc["store"]["$id"] if isinstance(doc.get("store"), dict) else doc.get("store")
+    if owner_id != store_id:
+        return False
+    databases.delete_document(DATABASE_ID, FAQS_COLLECTION, faq_id)
+    return True
+
+
+# --- Feedback ---
+
+def submit_feedback(store_id: str, message: str) -> dict:
+    return databases.create_document(
+        DATABASE_ID, FEEDBACK_COLLECTION, ID.unique(),
+        data={"store": store_id, "message": message},
+    )
