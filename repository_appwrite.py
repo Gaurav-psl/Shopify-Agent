@@ -146,17 +146,19 @@ def has_dashboard_user(store_id: str) -> bool:
 
 
 def get_dashboard_user_by_email(email: str) -> dict | None:
+    normalized = (email or "").strip().lower()
     result = databases.list_documents(
         DATABASE_ID, DASHBOARD_USERS_COLLECTION,
-        queries=[Query.equal("email", email)],
+        queries=[Query.equal("email", normalized)],
     )
     return result["documents"][0] if result["documents"] else None
 
 
 def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict:
+    normalized = (email or "").strip().lower()
     return databases.create_document(
         DATABASE_ID, DASHBOARD_USERS_COLLECTION, ID.unique(),
-        data={"store": store_id, "email": email, "password_hash": password_hash},
+        data={"store": store_id, "email": normalized, "password_hash": password_hash},
     )
 
 
