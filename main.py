@@ -16,7 +16,9 @@ import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
+from nicegui import ui
 
+import dashboard_nicegui
 import shopify_auth
 import dashboard
 import webhooks
@@ -38,3 +40,5 @@ app.include_router(shopify_auth.router)
 app.include_router(dashboard.router)
 app.include_router(webhooks.router)
 # app.include_router(chatbot_widget.router)  # add back once migrated
+
+ui.run_with(app, storage_secret=os.environ.get("SESSION_SECRET", "change-me-in-production"))
