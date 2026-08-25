@@ -37,7 +37,6 @@ os.makedirs("static/uploads", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.include_router(shopify_auth.router)
-app.include_router(dashboard.router)
 app.include_router(webhooks.router)
 # app.include_router(chatbot_widget.router)  # add back once migrated
 
