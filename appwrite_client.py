@@ -32,3 +32,9 @@ FLOWS_COLLECTION = "flows"
 REQUEST_LOGS_COLLECTION = "request_logs"
 CUSTOMIZATIONS_COLLECTION = "agent_customizations"
 DASHBOARD_USERS_COLLECTION = "dashboard_users"
+
+# Added for the rich "RenderLink" dashboard (see setup_collections.py)
+FEATURES_COLLECTION = "features"
+STORE_INFO_COLLECTION = "store_info"
+FAQS_COLLECTION = "faqs"
+FEEDBACK_COLLECTION = "feedback"
