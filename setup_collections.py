@@ -1,31 +1,49 @@
 """
 setup_collections.py
 ---------------------
-Run this to create your database structure in Appwrite. Equivalent to
-Base.metadata.create_all() in SQLAlchemy, but explicit — you define
-every attribute (column) and relationship as a separate API call.
+Adds the Appwrite structure needed for the rich "RenderLink" dashboard
+on top of what you already have (Stores, Flows, RequestLogs,
+AgentCustomizations, DashboardUsers — those are assumed to already
+exist and are not touched by this script).
 
-Safe to re-run: every create_* call is wrapped so a 409 "already exists"
-response is printed and skipped instead of crashing the whole script.
+This script only:
+  1. Adds `instructions`, `status`, `widget_position` attributes to
+     your existing AgentCustomizations collection.
+  2. Creates 4 new collections — Features, StoreInfo, FAQs, Feedback —
+     each with a relationship back to Stores.
+
+Safe to re-run: every create_* call is wrapped so a 409 "already
+exists" response is printed and skipped instead of crashing the
+script.
 
 Also handles Appwrite's ASYNC attribute creation automatically: an
-attribute (e.g. "email") briefly stays in "processing" status right
-after creation, and any index or relationship that references it will
-fail with "attribute ... is not yet available" if it runs too soon.
-Rather than making you manually re-trigger a Render build every time
-that happens, this script retries automatically with a short delay.
+attribute briefly stays in "processing" status right after creation,
+and any index or relationship that references it will fail with
+"attribute ... is not yet available" if it runs too soon. This script
+retries automatically with a short delay instead of making you rerun
+it by hand every time that happens.
+
+>>> BEFORE RUNNING <<<
+Add these four new collection ID constants to appwrite_client.py
+(pick any string ids you like, e.g. "features", "store_info", "faqs",
+"feedback") and export them alongside your existing constants:
+
+    FEATURES_COLLECTION
+    STORE_INFO_COLLECTION
+    FAQS_COLLECTION
+    FEEDBACK_COLLECTION
 
 Run: python setup_collections.py
 """
 
 import time
 
-from appwrite_client import databases, DATABASE_ID, STORES_COLLECTION, FLOWS_COLLECTION, REQUEST_LOGS_COLLECTION, CUSTOMIZATIONS_COLLECTION, DASHBOARD_USERS_COLLECTION
+from appwrite_client import (
+    databases, DATABASE_ID, STORES_COLLECTION, CUSTOMIZATIONS_COLLECTION,
+    FEATURES_COLLECTION, STORE_INFO_COLLECTION, FAQS_COLLECTION, FEEDBACK_COLLECTION,
+)
 from appwrite.exception import AppwriteException
-from appwrite.permission import Permission
-from appwrite.role import Role
 from appwrite.enums.relationship_type import RelationshipType
-from appwrite.enums.index_type import IndexType
 
 NOT_YET_AVAILABLE_RETRIES = 12   # up to ~1 minute of waiting per step
 NOT_YET_AVAILABLE_DELAY_SECONDS = 5
@@ -64,104 +82,92 @@ def _run(step_description, fn, *args, **kwargs):
 
 
 def setup():
-    # ---- Database ----
-    _run(f"Database '{DATABASE_ID}'...", databases.create, database_id=DATABASE_ID, name="shopify_agent_db")
-
-    # ---- Stores collection (equivalent of your Store table) ----
+    # ---- New attributes on the existing AgentCustomizations collection ----
     _run(
-        f"Collection '{STORES_COLLECTION}'...",
-        databases.create_collection,
-        database_id=DATABASE_ID,
-        collection_id=STORES_COLLECTION,
-        name="Stores",
-        # Only your server (via API key) can write; nobody can read/write
-        # directly from the client, since this holds access tokens.
-        permissions=[],
-    )
-    _run("  attribute 'shop_domain'...", databases.create_string_attribute, DATABASE_ID, STORES_COLLECTION, "shop_domain", size=255, required=True)
-    _run("  attribute 'access_token'...", databases.create_string_attribute, DATABASE_ID, STORES_COLLECTION, "access_token", size=500, required=True)
-    _run("  attribute 'scopes'...", databases.create_string_attribute, DATABASE_ID, STORES_COLLECTION, "scopes", size=500, required=False)
-    _run("  attribute 'uninstalled'...", databases.create_boolean_attribute, DATABASE_ID, STORES_COLLECTION, "uninstalled", required=False, default=False)
-    _run("  attribute 'installed_at'...", databases.create_datetime_attribute, DATABASE_ID, STORES_COLLECTION, "installed_at", required=False)
-    # A unique index — Appwrite's equivalent of unique=True on a SQLAlchemy column
-    _run("  index 'unique_shop_domain'...", databases.create_index, DATABASE_ID, STORES_COLLECTION, key="unique_shop_domain", type=IndexType.UNIQUE, attributes=["shop_domain"])
-
-    # ---- Flows collection ----
-    _run(f"Collection '{FLOWS_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=FLOWS_COLLECTION, name="Flows", permissions=[])
-    _run("  attribute 'intent'...", databases.create_string_attribute, DATABASE_ID, FLOWS_COLLECTION, "intent", size=100, required=True)
-    _run("  attribute 'action'...", databases.create_string_attribute, DATABASE_ID, FLOWS_COLLECTION, "action", size=100, required=True)
-    _run("  attribute 'url'...", databases.create_string_attribute, DATABASE_ID, FLOWS_COLLECTION, "url", size=1000, required=True)
-    _run("  attribute 'steps_json'...", databases.create_string_attribute, DATABASE_ID, FLOWS_COLLECTION, "steps_json", size=20000, required=True)  # stored as JSON text
-
-    # ---- Request logs collection ----
-    _run(f"Collection '{REQUEST_LOGS_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=REQUEST_LOGS_COLLECTION, name="RequestLogs", permissions=[])
-    _run("  attribute 'message'...", databases.create_string_attribute, DATABASE_ID, REQUEST_LOGS_COLLECTION, "message", size=2000, required=True)
-    _run("  attribute 'detected_intent'...", databases.create_string_attribute, DATABASE_ID, REQUEST_LOGS_COLLECTION, "detected_intent", size=100, required=False)
-    _run("  attribute 'detected_action'...", databases.create_string_attribute, DATABASE_ID, REQUEST_LOGS_COLLECTION, "detected_action", size=100, required=False)
-    _run("  attribute 'status'...", databases.create_string_attribute, DATABASE_ID, REQUEST_LOGS_COLLECTION, "status", size=50, required=True)
-    _run("  attribute 'reply'...", databases.create_string_attribute, DATABASE_ID, REQUEST_LOGS_COLLECTION, "reply", size=2000, required=False)
-
-    # ---- Agent customizations collection ----
-    _run(f"Collection '{CUSTOMIZATIONS_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=CUSTOMIZATIONS_COLLECTION, name="AgentCustomizations", permissions=[])
-    _run("  attribute 'agent_name'...", databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION, "agent_name", size=100, required=False, default="AI Assistant")
-    _run("  attribute 'agent_title'...", databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION, "agent_title", size=150, required=False)
-    _run("  attribute 'theme_color'...", databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION, "theme_color", size=20, required=False, default="#2b2b2b")
-    _run("  attribute 'icon_type'...", databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION, "icon_type", size=20, required=False, default="preset")
-    _run("  attribute 'custom_icon_url'...", databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION, "custom_icon_url", size=500, required=False)
-
-    # ---- Dashboard users collection (store owner's login, separate from
-    # their Shopify login) ----
-    _run(f"Collection '{DASHBOARD_USERS_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=DASHBOARD_USERS_COLLECTION, name="DashboardUsers", permissions=[])
-    _run("  attribute 'email'...", databases.create_email_attribute, DATABASE_ID, DASHBOARD_USERS_COLLECTION, "email", required=True)
-    _run("  attribute 'password_hash'...", databases.create_string_attribute, DATABASE_ID, DASHBOARD_USERS_COLLECTION, "password_hash", size=255, required=True)
-    _run("  index 'unique_email'...", databases.create_index, DATABASE_ID, DASHBOARD_USERS_COLLECTION, key="unique_email", type=IndexType.UNIQUE, attributes=["email"])
-
-    # ---- Relationships — Appwrite's version of a foreign key ----
-    # These link Flows, RequestLogs, and Customizations each back to a
-    # Store, exactly like store_id = ForeignKey("stores.id") in SQLAlchemy.
-    _run(
-        "  relationship 'flows.store' <-> 'stores.flows'...",
-        databases.create_relationship_attribute,
-        database_id=DATABASE_ID,
-        collection_id=FLOWS_COLLECTION,
-        related_collection_id=STORES_COLLECTION,
-        type=RelationshipType.MANYTOONE,  # many flows belong to one store
-        two_way=True,
-        key="store",
-        two_way_key="flows",
+        "  attribute 'agent_customizations.instructions'...",
+        databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
+        "instructions", size=5000, required=False,
     )
     _run(
-        "  relationship 'request_logs.store' <-> 'stores.request_logs'...",
-        databases.create_relationship_attribute,
-        database_id=DATABASE_ID,
-        collection_id=REQUEST_LOGS_COLLECTION,
-        related_collection_id=STORES_COLLECTION,
-        type=RelationshipType.MANYTOONE,
-        two_way=True,
-        key="store",
-        two_way_key="request_logs",
+        "  attribute 'agent_customizations.status'...",
+        databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
+        "status", size=20, required=False, default="active",
     )
     _run(
-        "  relationship 'agent_customizations.store' <-> 'stores.customization'...",
+        "  attribute 'agent_customizations.widget_position'...",
+        databases.create_string_attribute, DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
+        "widget_position", size=20, required=False, default="bottom-right",
+    )
+
+    # ---- Features collection — one row per store, boolean toggles ----
+    _run(f"Collection '{FEATURES_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=FEATURES_COLLECTION, name="Features", permissions=[])
+    _run("  attribute 'product_search'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "product_search", required=False, default=True)
+    _run("  attribute 'recommendations'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "recommendations", required=False, default=True)
+    _run("  attribute 'product_filtering'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "product_filtering", required=False, default=True)
+    _run("  attribute 'warranty'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "warranty", required=False, default=True)
+    _run("  attribute 'cart_editing'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "cart_editing", required=False, default=True)
+    _run("  attribute 'returns'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "returns", required=False, default=False)
+    _run("  attribute 'track_orders'...", databases.create_boolean_attribute, DATABASE_ID, FEATURES_COLLECTION, "track_orders", required=False, default=True)
+
+    # ---- StoreInfo collection — one row per store, business details ----
+    _run(f"Collection '{STORE_INFO_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=STORE_INFO_COLLECTION, name="StoreInfo", permissions=[])
+    _run("  attribute 'business_name'...", databases.create_string_attribute, DATABASE_ID, STORE_INFO_COLLECTION, "business_name", size=200, required=False)
+    _run("  attribute 'support_email'...", databases.create_string_attribute, DATABASE_ID, STORE_INFO_COLLECTION, "support_email", size=255, required=False)
+    _run("  attribute 'timezone'...", databases.create_string_attribute, DATABASE_ID, STORE_INFO_COLLECTION, "timezone", size=50, required=False, default="UTC")
+
+    # ---- FAQs collection — many rows per store ----
+    _run(f"Collection '{FAQS_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=FAQS_COLLECTION, name="FAQs", permissions=[])
+    _run("  attribute 'question'...", databases.create_string_attribute, DATABASE_ID, FAQS_COLLECTION, "question", size=500, required=True)
+    _run("  attribute 'answer'...", databases.create_string_attribute, DATABASE_ID, FAQS_COLLECTION, "answer", size=2000, required=True)
+
+    # ---- Feedback collection — many rows per store, write-mostly ----
+    _run(f"Collection '{FEEDBACK_COLLECTION}'...", databases.create_collection, database_id=DATABASE_ID, collection_id=FEEDBACK_COLLECTION, name="Feedback", permissions=[])
+    _run("  attribute 'message'...", databases.create_string_attribute, DATABASE_ID, FEEDBACK_COLLECTION, "message", size=2000, required=True)
+
+    # ---- Relationships — link each new collection back to Stores ----
+    _run(
+        "  relationship 'features.store' <-> 'stores.features'...",
         databases.create_relationship_attribute,
         database_id=DATABASE_ID,
-        collection_id=CUSTOMIZATIONS_COLLECTION,
+        collection_id=FEATURES_COLLECTION,
         related_collection_id=STORES_COLLECTION,
-        type=RelationshipType.ONETOONE,   # one customization row per store
+        type=RelationshipType.ONETOONE,   # one features row per store
         two_way=True,
         key="store",
-        two_way_key="customization",
+        two_way_key="features",
     )
     _run(
-        "  relationship 'dashboard_users.store' <-> 'stores.dashboard_user'...",
+        "  relationship 'store_info.store' <-> 'stores.store_info'...",
         databases.create_relationship_attribute,
         database_id=DATABASE_ID,
-        collection_id=DASHBOARD_USERS_COLLECTION,
+        collection_id=STORE_INFO_COLLECTION,
         related_collection_id=STORES_COLLECTION,
-        type=RelationshipType.ONETOONE,   # one dashboard login per store
+        type=RelationshipType.ONETOONE,   # one store_info row per store
         two_way=True,
         key="store",
-        two_way_key="dashboard_user",
+        two_way_key="store_info",
+    )
+    _run(
+        "  relationship 'faqs.store' <-> 'stores.faqs'...",
+        databases.create_relationship_attribute,
+        database_id=DATABASE_ID,
+        collection_id=FAQS_COLLECTION,
+        related_collection_id=STORES_COLLECTION,
+        type=RelationshipType.MANYTOONE,  # many FAQs belong to one store
+        two_way=True,
+        key="store",
+        two_way_key="faqs",
+    )
+    _run(
+        "  relationship 'feedback.store' <-> 'stores.feedback'...",
+        databases.create_relationship_attribute,
+        database_id=DATABASE_ID,
+        collection_id=FEEDBACK_COLLECTION,
+        related_collection_id=STORES_COLLECTION,
+        type=RelationshipType.MANYTOONE,  # many feedback rows belong to one store
+        two_way=True,
+        key="store",
+        two_way_key="feedback",
     )
 
     print("\nDone. If anything above said 'FAILED' (not 'already exists, skipped'),\n"
