@@ -40,4 +40,4 @@ app.include_router(shopify_auth.router)
 app.include_router(webhooks.router)
 # app.include_router(chatbot_widget.router)  # add back once migrated
 
-ui.run_with(app, storage_secret=os.environ.get("SESSION_SECRET", "change-me-in-production"))
+ui.run_with(app, storage_secret=os.environ.get("SESSION_SECRET", SESSION_SECRET))
