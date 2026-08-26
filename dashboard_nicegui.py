@@ -28,6 +28,12 @@ PAGE_BG = "#F3F4F6"
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "static/uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# The exact Client ID Shopify issued for this app. This MUST match
+# whatever env var shopify_auth.py already uses for OAuth (it may be
+# named differently there — e.g. SHOPIFY_CLIENT_ID — check and align
+# the name below if so; App Bridge won't work with the wrong value).
+SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY", "")
+
 NAV_ITEMS = [
     ("overview", "Overview", "home"),
     ("store", "Store Information", "storefront"),
@@ -89,6 +95,23 @@ def _initial(store: dict) -> str:
     return (app.storage.user.get("email") or store["shop_domain"])[0].upper()
 
 
+def _shopify_nav_menu():
+    """Registers this app's nav links with Shopify Admin via App Bridge,
+    so they render nested under the app's name in Shopify's OWN sidebar
+    (like the screenshot) instead of a sidebar drawn inside our iframe.
+
+    Requires SHOPIFY_API_KEY to be set to the exact Client ID Shopify
+    issued for this app — App Bridge silently no-ops if it's wrong or
+    missing, so double check it against shopify_auth.py's OAuth setup.
+    """
+    ui.add_head_html(f'''
+        <meta name="shopify-api-key" content="{SHOPIFY_API_KEY}">
+        <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+    ''')
+    links_html = "".join(f'<a href="/dashboard/{key}">{label}</a>' for key, label, _ in NAV_ITEMS)
+    ui.html(f"<ui-nav-menu>{links_html}</ui-nav-menu>").style("display:none;")
+
+
 # --------------------------------------------------------------------
 # App Info modal — matches the JSX "App Info" popup
 # --------------------------------------------------------------------
@@ -113,6 +136,7 @@ def _app_info_dialog(agent: dict):
 # Shared layout — header + sidebar, wraps every logged-in page
 # --------------------------------------------------------------------
 def _layout(active_key: str, store: dict, agent: dict):
+    _shopify_nav_menu()
     info_dialog = _app_info_dialog(agent)
     s = STATUS_STYLES.get(agent.get("status", "active"), STATUS_STYLES["active"])
 
@@ -148,59 +172,14 @@ def _layout(active_key: str, store: dict, agent: dict):
             ):
                 ui.label(_initial(store))
 
-    # ---- Sidebar ----
-    with ui.left_drawer(fixed=True).classes("bg-white").style("border-right:1px solid #F3F4F6;padding:0;width:256px;"):
-        with ui.column().classes("w-full h-full justify-between p-3 gap-3"):
-            with ui.column().classes("w-full gap-0.5"):
-                with ui.row().classes("items-center gap-2.5 p-2 mb-2"):
-                    with ui.element("div").classes("w-9 h-9 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
-                        ui.icon("forum", size="18px").style("color:white;")
-                    with ui.column().classes("gap-0"):
-                        ui.label("RenderLink").classes("font-bold text-gray-900 leading-tight")
-                        ui.label("AI Shopping Assistant").classes("text-[11px] text-gray-400 leading-tight")
+            ui.button("Log out", icon="logout", on_click=_logout).props("no-caps flat").classes(
+                "px-3 py-1.5 text-xs font-semibold"
+            ).style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
 
-                for key, label, icon in NAV_ITEMS:
-                    is_active = key == active_key
-                    btn = ui.button(label, icon=icon, on_click=lambda k=key: ui.navigate.to(f"/dashboard/{k}"))
-                    btn.props("flat align=left no-caps").classes("w-full justify-start text-sm font-medium")
-                    if is_active:
-                        btn.style(f"background:{BRAND};color:white;border-radius:10px;")
-                    else:
-                        btn.style("color:#4B5563;border-radius:10px;")
-
-                ui.element("div").classes("w-full").style("border-top:1px solid #F3F4F6;margin-top:6px;padding-top:6px;")
-                ui.button("Settings", icon="settings").props("flat align=left no-caps").classes(
-                    "w-full justify-start text-sm font-medium"
-                ).style("color:#4B5563;border-radius:10px;")
-
-            with ui.column().classes("w-full gap-3"):
-                # "Need help?" card
-                with ui.column().classes("w-full p-4 gap-2").style(f"background:{BRAND_SOFT};border-radius:16px;"):
-                    with ui.row().classes("items-start gap-2"):
-                        with ui.element("div").classes("w-8 h-8 rounded-full bg-white flex items-center justify-center flex-shrink-0"):
-                            ui.icon("help_outline", size="15px").style(f"color:{BRAND};")
-                        with ui.column().classes("gap-0"):
-                            ui.label("Need help?").classes("text-xs font-bold text-gray-800")
-                            ui.label("We're here to help you set up and grow.").classes("text-[11px] text-gray-500")
-                    ui.button(
-                        "Contact Support", on_click=lambda: ui.navigate.to("/dashboard/feedback")
-                    ).props("no-caps").classes("w-full").style(f"background:white;color:{BRAND};border-radius:8px;font-size:12px;")
-
-                # Account block
-                with ui.row().classes("w-full items-center gap-2.5 p-2.5").style("border:1px solid #F3F4F6;border-radius:12px;"):
-                    with ui.element("div").classes("w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0").style(
-                        f"background:{BRAND};color:white;font-size:13px;font-weight:700;"
-                    ):
-                        ui.label(_initial(store))
-                    with ui.column().classes("gap-0 min-w-0"):
-                        ui.label(store["shop_domain"]).classes("text-xs font-bold text-gray-800 truncate")
-                        with ui.row().classes("items-center gap-1"):
-                            ui.element("div").classes("w-1.5 h-1.5 rounded-full bg-gray-400")
-                            ui.label("Connected").classes("text-[11px] text-gray-500")
-
-                ui.button("Log out", icon="logout", on_click=_logout).props("no-caps flat").classes(
-                    "w-full justify-center text-sm font-semibold"
-                ).style("border:1px solid #E5E7EB;border-radius:10px;color:#4B5563;")
+    # ---- Shopify Admin's own sidebar now owns navigation (see screenshot) ----
+    # No custom left_drawer here anymore — _shopify_nav_menu() (called
+    # above) registers the same links via App Bridge, and Shopify renders
+    # them nested under the app's name in its own sidebar instead.
 
     content = ui.column().classes("w-full max-w-3xl mx-auto p-6 gap-4")
     return content
