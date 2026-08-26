@@ -1,36 +1,16 @@
 """
 dashboard_nicegui.py
 ---------------------
-The full "RenderLink" dashboard (sidebar nav, Overview, Store Info,
-AI Agent, Features, Appearance, Knowledge/FAQs, Feedback) built with
-NiceGUI — pure Python, reactive components (switches flip instantly,
-no full-page reloads needed like the plain-HTML version), no JSX, no
-npm, no build step.
+The full "RenderLink" dashboard, built with NiceGUI to match the
+original DashboardApp.jsx layout element-for-element: sidebar with a
+"Need help?" card and account block, a full topbar (store pill, status
+pill, App Info modal, Help, notification bell, avatar), a Features
+dropdown that opens a right-side slide panel per feature (not a flat
+list), a richer Overview page with a live widget preview bubble, and
+matching iconography throughout (NiceGUI ships Material Icons, used
+here as the closest equivalent to the lucide-react icons in the JSX).
 
-HOW THIS MOUNTS INTO YOUR EXISTING FASTAPI APP
-------------------------------------------------
-NiceGUI runs on top of FastAPI. `@ui.page(...)` below registers real
-routes on your `app` the same way `@router.get(...)` does elsewhere in
-your project — you just attach it once, at the bottom of main.py:
-
-    from nicegui import ui
-    import dashboard_nicegui  # noqa: F401 — importing registers the @ui.page routes
-    ui.run_with(app, storage_secret=os.environ.get("SESSION_SECRET", "change-me"))
-
-Because this file's pages already live at /dashboard/..., it takes
-over the exact same URLs your old HTML dashboard.py used — so REMOVE
-(or comment out) `app.include_router(dashboard.router)` in main.py so
-the two don't fight over the same routes. dashboard_api.py can stay or
-go; this file doesn't use it (it talks to repository_appwrite.py
-directly, same as dashboard.py did).
-
-SESSIONS
---------
-NiceGUI ships its own per-browser storage (`app.storage.user`), backed
-by a signed cookie — separate from Starlette's SessionMiddleware used
-by dashboard_api.py. That's fine since this file is self-contained; it
-doesn't need to share a session with the JSON API.
-
+See the bottom of main.py for how this mounts onto your FastAPI app.
 Run: pip install nicegui
 """
 
@@ -50,19 +30,19 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 NAV_ITEMS = [
     ("overview", "Overview", "home"),
-    ("store", "Store Information", "store"),
+    ("store", "Store Information", "storefront"),
     ("agent", "AI Agent", "smart_toy"),
     ("features", "Features", "grid_view"),
     ("appearance", "Appearance", "palette"),
     ("knowledge", "Knowledge (FAQs)", "menu_book"),
-    ("feedback", "Feedback & Help", "help"),
+    ("feedback", "Feedback & Help", "help_outline"),
 ]
 
 FEATURE_LIST = [
     ("product_search", "Product Search", "search"),
     ("recommendations", "Recommendations", "auto_awesome"),
-    ("product_filtering", "Product Filtering", "filter_alt"),
-    ("warranty", "Warranty", "verified"),
+    ("product_filtering", "Product Filtering", "search"),
+    ("warranty", "Warranty", "check_circle"),
     ("cart_editing", "Cart Editing", "shopping_cart"),
     ("returns", "Returns", "replay"),
     ("track_orders", "Track Orders", "local_shipping"),
@@ -80,7 +60,7 @@ CARD_CLASSES = "bg-white rounded-2xl border border-gray-100 shadow-sm w-full"
 
 
 # --------------------------------------------------------------------
-# Session helpers — backed by NiceGUI's app.storage.user
+# Session helpers
 # --------------------------------------------------------------------
 def _current_store() -> dict | None:
     store_id = app.storage.user.get("store_id")
@@ -93,7 +73,6 @@ def _current_store() -> dict | None:
 
 
 def _require_store():
-    """Returns the store, or navigates to /login and returns None."""
     store = _current_store()
     if not store:
         ui.navigate.to("/dashboard/login")
@@ -106,27 +85,74 @@ def _logout():
     ui.navigate.to("/dashboard/login")
 
 
+def _initial(store: dict) -> str:
+    return (app.storage.user.get("email") or store["shop_domain"])[0].upper()
+
+
+# --------------------------------------------------------------------
+# App Info modal — matches the JSX "App Info" popup
+# --------------------------------------------------------------------
+def _app_info_dialog(agent: dict):
+    s = STATUS_STYLES.get(agent.get("status", "active"), STATUS_STYLES["active"])
+    with ui.dialog() as dialog, ui.card().classes("p-6 w-full max-w-sm gap-1"):
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            ui.label("App Info").classes("font-bold text-gray-900")
+            ui.button(icon="close", on_click=dialog.close).props("flat round dense").style("color:#9CA3AF;")
+        ui.label("RenderLink AI Shopping Assistant").classes("text-sm text-gray-500")
+        ui.label("Version 1.0.0").classes("text-sm text-gray-500")
+        with ui.row().classes("items-center gap-1"):
+            ui.label("Status:").classes("text-sm text-gray-500")
+            ui.label(s["label"]).classes("text-sm font-semibold").style(f"color:{s['dot']};")
+        ui.button("Close", on_click=dialog.close).props("no-caps").classes("w-full mt-3").style(
+            f"background:{BRAND};color:white;border-radius:8px;"
+        )
+    return dialog
+
+
 # --------------------------------------------------------------------
 # Shared layout — header + sidebar, wraps every logged-in page
 # --------------------------------------------------------------------
 def _layout(active_key: str, store: dict, agent: dict):
-    """Builds the header + sidebar chrome, and returns the content
-    container to add page-specific content into."""
+    info_dialog = _app_info_dialog(agent)
     s = STATUS_STYLES.get(agent.get("status", "active"), STATUS_STYLES["active"])
 
+    # ---- Topbar ----
     with ui.header().classes("items-center justify-between px-6").style(
-        "background:white;border-bottom:1px solid #F3F4F6;color:#111827;height:60px;"
+        "background:white;border-bottom:1px solid #F3F4F6;color:#111827;height:64px;"
     ):
         with ui.row().classes("items-center gap-2"):
-            ui.icon("store", size="18px").style("color:#374151;")
-            ui.label(store["shop_domain"]).classes("text-sm font-semibold")
-        with ui.row().classes("items-center gap-2"):
-            ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};font-weight:700;")
+            ui.label("Store:").classes("text-sm text-gray-500")
+            with ui.row().classes("items-center gap-1.5 px-3 py-1.5 rounded-lg").style("background:#F9FAFB;"):
+                ui.icon("storefront", size="16px").style("color:#374151;")
+                ui.label(store["shop_domain"]).classes("text-sm font-medium text-gray-800")
 
-    with ui.left_drawer(fixed=True).classes("bg-white").style("border-right:1px solid #F3F4F6;padding:0;"):
-        with ui.column().classes("w-full h-full justify-between p-3"):
-            with ui.column().classes("w-full gap-1"):
-                with ui.row().classes("items-center gap-2 p-3 mb-2"):
+        with ui.row().classes("items-center gap-2.5"):
+            with ui.row().classes("items-center gap-1.5 px-3 py-1.5 rounded-full").style(f"background:{s['bg']};"):
+                ui.element("div").classes("w-1.5 h-1.5 rounded-full").style(f"background:{s['dot']};")
+                ui.label(s["label"]).classes("text-xs font-semibold").style(f"color:{s['text']};")
+
+            ui.button("App Info", icon="info", on_click=info_dialog.open).props("no-caps flat").classes(
+                "px-3 py-1.5 text-xs font-semibold"
+            ).style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
+
+            ui.button("Help", icon="help_outline", on_click=lambda: ui.navigate.to("/dashboard/feedback")).props(
+                "no-caps flat"
+            ).classes("px-3 py-1.5 text-xs font-semibold").style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
+
+            ui.button(icon="notifications").props("flat round dense").style(
+                "border:1px solid #E5E7EB;color:#6B7280;width:32px;height:32px;"
+            )
+
+            with ui.element("div").classes("w-8 h-8 rounded-full flex items-center justify-center").style(
+                f"background:{BRAND};color:white;font-size:12px;font-weight:700;"
+            ):
+                ui.label(_initial(store))
+
+    # ---- Sidebar ----
+    with ui.left_drawer(fixed=True).classes("bg-white").style("border-right:1px solid #F3F4F6;padding:0;width:256px;"):
+        with ui.column().classes("w-full h-full justify-between p-3 gap-3"):
+            with ui.column().classes("w-full gap-0.5"):
+                with ui.row().classes("items-center gap-2.5 p-2 mb-2"):
                     with ui.element("div").classes("w-9 h-9 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
                         ui.icon("forum", size="18px").style("color:white;")
                     with ui.column().classes("gap-0"):
@@ -136,16 +162,45 @@ def _layout(active_key: str, store: dict, agent: dict):
                 for key, label, icon in NAV_ITEMS:
                     is_active = key == active_key
                     btn = ui.button(label, icon=icon, on_click=lambda k=key: ui.navigate.to(f"/dashboard/{k}"))
-                    btn.props("flat align=left no-caps").classes("w-full justify-start")
+                    btn.props("flat align=left no-caps").classes("w-full justify-start text-sm font-medium")
                     if is_active:
                         btn.style(f"background:{BRAND};color:white;border-radius:10px;")
                     else:
                         btn.style("color:#4B5563;border-radius:10px;")
 
-            with ui.column().classes("w-full gap-2"):
-                ui.button("Log out", icon="logout", on_click=_logout).props("flat no-caps").classes("w-full").style(
-                    "border:1px solid #E5E7EB;border-radius:10px;color:#4B5563;"
-                )
+                ui.element("div").classes("w-full").style("border-top:1px solid #F3F4F6;margin-top:6px;padding-top:6px;")
+                ui.button("Settings", icon="settings").props("flat align=left no-caps").classes(
+                    "w-full justify-start text-sm font-medium"
+                ).style("color:#4B5563;border-radius:10px;")
+
+            with ui.column().classes("w-full gap-3"):
+                # "Need help?" card
+                with ui.column().classes("w-full p-4 gap-2").style(f"background:{BRAND_SOFT};border-radius:16px;"):
+                    with ui.row().classes("items-start gap-2"):
+                        with ui.element("div").classes("w-8 h-8 rounded-full bg-white flex items-center justify-center flex-shrink-0"):
+                            ui.icon("help_outline", size="15px").style(f"color:{BRAND};")
+                        with ui.column().classes("gap-0"):
+                            ui.label("Need help?").classes("text-xs font-bold text-gray-800")
+                            ui.label("We're here to help you set up and grow.").classes("text-[11px] text-gray-500")
+                    ui.button(
+                        "Contact Support", on_click=lambda: ui.navigate.to("/dashboard/feedback")
+                    ).props("no-caps").classes("w-full").style(f"background:white;color:{BRAND};border-radius:8px;font-size:12px;")
+
+                # Account block
+                with ui.row().classes("w-full items-center gap-2.5 p-2.5").style("border:1px solid #F3F4F6;border-radius:12px;"):
+                    with ui.element("div").classes("w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0").style(
+                        f"background:{BRAND};color:white;font-size:13px;font-weight:700;"
+                    ):
+                        ui.label(_initial(store))
+                    with ui.column().classes("gap-0 min-w-0"):
+                        ui.label(store["shop_domain"]).classes("text-xs font-bold text-gray-800 truncate")
+                        with ui.row().classes("items-center gap-1"):
+                            ui.element("div").classes("w-1.5 h-1.5 rounded-full bg-gray-400")
+                            ui.label("Connected").classes("text-[11px] text-gray-500")
+
+                ui.button("Log out", icon="logout", on_click=_logout).props("no-caps flat").classes(
+                    "w-full justify-center text-sm font-semibold"
+                ).style("border:1px solid #E5E7EB;border-radius:10px;color:#4B5563;")
 
     content = ui.column().classes("w-full max-w-3xl mx-auto p-6 gap-4")
     return content
@@ -157,12 +212,84 @@ def _page_header(title: str, subtitle: str):
 
 
 # --------------------------------------------------------------------
+# Features dropdown + slide-out detail panel — used on Overview
+# --------------------------------------------------------------------
+def _features_dropdown(store: dict, features: dict):
+    open_state = {"v": False}
+
+    with ui.column().classes("w-full gap-0").style("position:relative;"):
+        trigger = ui.row().classes("w-full items-center justify-between px-4 py-3 cursor-pointer").style(
+            "background:white;border:1px solid #E5E7EB;border-radius:12px;"
+        )
+        with trigger:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("grid_view", size="16px").style("color:#374151;")
+                ui.label("Enabled Features").classes("text-sm font-semibold text-gray-700")
+            chevron = ui.icon("expand_more", size="16px").style("color:#9CA3AF;transition:transform 0.15s;")
+
+        dropdown_list = ui.column().classes("w-full gap-0").style(
+            "position:absolute;top:52px;left:0;right:0;z-index:20;background:white;"
+            "border:1px solid #E5E7EB;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.08);overflow:hidden;display:none;"
+        )
+
+        panels = {}
+        for key, label, icon in FEATURE_LIST:
+            panels[key] = _feature_panel(store, features, key, label, icon)
+
+        with dropdown_list:
+            for key, label, icon in FEATURE_LIST:
+                with ui.row().classes("w-full items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-gray-50").style(
+                    "border-bottom:1px solid #F9FAFB;"
+                ).on("click", lambda k=key: panels[k].open()):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon(icon, size="14px").style("color:#4B5563;")
+                        ui.label(label).classes("text-sm text-gray-700")
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("On" if features.get(key) else "Off").classes("text-[10px] font-semibold text-gray-400")
+                        ui.icon("arrow_forward", size="12px").style("color:#D1D5DB;")
+
+        def toggle_open():
+            open_state["v"] = not open_state["v"]
+            dropdown_list.style(f"display:{'flex' if open_state['v'] else 'none'};")
+            chevron.style(f"transform:rotate({180 if open_state['v'] else 0}deg);")
+
+        trigger.on("click", toggle_open)
+
+
+def _feature_panel(store: dict, features: dict, key: str, label: str, icon: str):
+    """A right-side slide-out dialog for a single feature, matching the
+    JSX fixed inset-0 overlay + w-80 side panel."""
+    with ui.dialog() as dialog:
+        dialog.props("position=right")
+        with ui.card().classes("h-screen p-6 gap-4").style("width:320px;max-width:90vw;border-radius:0;"):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon(icon, size="18px").style("color:#111827;")
+                    ui.label(label).classes("font-bold text-gray-900")
+                ui.button(icon="close", on_click=dialog.close).props("flat round dense").style("color:#9CA3AF;")
+
+            with ui.row().classes("w-full items-center justify-between px-4 py-3 rounded-xl").style(f"background:{BRAND_SOFT};"):
+                ui.label("Enabled for this store").classes("text-sm font-medium text-gray-700")
+                sw = ui.switch(value=bool(features.get(key))).props("color=grey-8")
+
+                def on_change(e, k=key):
+                    repo.update_features(store["$id"], **{k: e.value})
+                    features[k] = e.value
+
+                sw.on_value_change(on_change)
+
+            ui.label(f"When on, shoppers can ask your AI assistant to {label.lower()} directly in chat.").classes(
+                "text-xs text-gray-500 leading-relaxed"
+            )
+    return dialog
+
+
+# --------------------------------------------------------------------
 # AUTH — Signup / Login
 # --------------------------------------------------------------------
 def _auth_shell():
     ui.query("body").style(f"background:{PAGE_BG};")
-    outer = ui.column().classes("w-full items-center justify-center").style("min-height:100vh;")
-    return outer
+    return ui.column().classes("w-full items-center justify-center").style("min-height:100vh;")
 
 
 @ui.page("/dashboard/signup")
@@ -205,9 +332,9 @@ def signup_page(shop: str = ""):
                 app.storage.user["email"] = user["email"]
                 ui.navigate.to("/dashboard/overview")
 
-            ui.button("Create account", on_click=submit).props("no-caps").classes("w-full mt-3").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
+            ui.button("Create account", on_click=submit).props("no-caps icon-right=arrow_forward").classes(
+                "w-full mt-3"
+            ).style(f"background:{BRAND};color:white;border-radius:10px;")
             with ui.row().classes("w-full justify-center mt-2"):
                 ui.label("Already have an account?").classes("text-xs text-gray-500")
                 ui.link("Log in", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
@@ -269,49 +396,88 @@ def overview_page():
     with content:
         _page_header("Overview", "Here's what's happening with your AI assistant today.")
 
-        with ui.card().classes(CARD_CLASSES + " p-5 gap-3"):
-            ui.label("AI Agent").classes("font-bold text-gray-900")
-            with ui.row().classes("w-full gap-8"):
-                with ui.column().classes("gap-0.5"):
-                    ui.label("Agent Name").classes("text-xs text-gray-500")
-                    ui.label(cfg.get("agent_name", "")).classes("font-bold")
-                    ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
-                    ui.label(cfg.get("agent_title", "")).classes("text-sm bg-gray-50 rounded-lg px-3 py-2")
-                    ui.label("Status").classes("text-xs text-gray-500 mt-2")
-                    ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
-                    ui.button("Manage Agent", icon="settings", on_click=lambda: ui.navigate.to("/dashboard/agent")).props(
-                        "no-caps flat"
-                    ).classes("mt-2").style(f"background:{BRAND_SOFT};color:{BRAND};border-radius:8px;")
+        # ---- AI Agent card ----
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("smart_toy", size="18px").style(f"color:{BRAND};")
+                ui.label("AI Agent").classes("font-bold text-gray-900")
 
-        with ui.card().classes(CARD_CLASSES + " p-5 gap-2"):
-            ui.label("Enabled Features").classes("font-bold text-gray-900 mb-1")
-            for key, label, icon in FEATURE_LIST:
-                with ui.row().classes("w-full items-center justify-between px-3 py-2 rounded-xl").style(f"background:{BRAND_SOFT};"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon(icon, size="16px").style("color:#4B5563;")
-                        ui.label(label).classes("text-sm text-gray-700")
-                    ui.label("On" if features.get(key) else "Off").classes("text-[11px] font-bold text-gray-400")
-            ui.button("Manage Features", icon="tune", on_click=lambda: ui.navigate.to("/dashboard/features")).props(
-                "no-caps flat"
-            ).classes("mt-1").style(f"background:{BRAND_SOFT};color:{BRAND};border-radius:8px;")
+            with ui.row().classes("w-full gap-6 items-start"):
+                with ui.element("div").classes("w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0").style(
+                    f"background:{BRAND_SOFT};"
+                ):
+                    ui.icon("smart_toy", size="34px").style(f"color:{BRAND};")
 
+                with ui.row().classes("flex-1 gap-8"):
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("Agent Name").classes("text-xs text-gray-500")
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label(cfg.get("agent_name", "")).classes("font-bold text-gray-900")
+                            ui.button("Edit", on_click=lambda: ui.navigate.to("/dashboard/agent")).props(
+                                "no-caps flat dense"
+                            ).classes("text-[11px] font-semibold px-2 py-0.5").style(
+                                f"background:{BRAND_SOFT};color:{BRAND};border-radius:999px;min-height:0;"
+                            )
+                        ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
+                        ui.label(cfg.get("agent_title", "")).classes("text-sm text-gray-700 rounded-lg px-3 py-2").style(
+                            "background:#F9FAFB;"
+                        )
+                        ui.label("Status").classes("text-xs text-gray-500 mt-2")
+                        ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
+                        ui.button(
+                            "Manage Agent", icon="settings", on_click=lambda: ui.navigate.to("/dashboard/agent")
+                        ).props("no-caps flat").classes("mt-1 text-xs font-semibold").style(
+                            f"background:{BRAND_SOFT};color:{BRAND};border-radius:8px;"
+                        )
+
+                    with ui.column().classes("gap-0.5"):
+                        with ui.row().classes("items-center gap-1.5"):
+                            ui.icon("desktop_windows", size="13px").style("color:#6B7280;")
+                            ui.label("Widget Live Preview").classes("text-xs text-gray-500")
+                        with ui.column().classes("relative p-3 gap-0").style(f"background:{BRAND_SOFT};border-radius:12px;height:128px;width:220px;"):
+                            with ui.column().classes("p-2.5 gap-0").style(
+                                "background:white;border-radius:12px;border-top-left-radius:0;box-shadow:0 1px 2px rgba(0,0,0,0.06);max-width:85%;"
+                            ):
+                                ui.label(cfg.get("agent_title", "")).classes("text-xs text-gray-800")
+                                ui.label("10:30 AM").classes("text-[10px] text-gray-400")
+                            with ui.element("div").classes("flex items-center justify-center").style(
+                                f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
+                                f"background:{BRAND};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
+                            ):
+                                ui.icon("forum", size="15px").style("color:white;")
+                        ui.button(
+                            "Open full preview", icon="arrow_forward", on_click=lambda: ui.navigate.to("/dashboard/appearance")
+                        ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
+
+        # ---- Enabled Features (dropdown) ----
+        with ui.card().classes(CARD_CLASSES + " p-2"):
+            _features_dropdown(store, features)
+
+        # ---- Quick Actions ----
         with ui.card().classes(CARD_CLASSES + " p-5 gap-1"):
-            ui.label("Quick Actions").classes("font-bold text-gray-900 mb-1")
+            with ui.row().classes("items-center gap-2 mb-1"):
+                ui.icon("bolt", size="17px").style(f"color:{BRAND};")
+                ui.label("Quick Actions").classes("font-bold text-gray-900 text-sm")
             quick = [
                 ("palette", "Customize Appearance", "Change colors, icon & position", "appearance"),
                 ("menu_book", "Manage FAQs", "Add or edit knowledge base", "knowledge"),
-                ("store", "Store Information", "Update your store details", "store"),
+                ("storefront", "Store Information", "Update your store details", "store"),
                 ("smart_toy", "AI Agent Settings", "Name, instructions & status", "agent"),
             ]
             for icon, title, sub, page in quick:
-                with ui.row().classes("w-full items-center gap-3 px-3 py-2 rounded-xl cursor-pointer hover:bg-gray-50").on(
+                with ui.row().classes("w-full items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer hover:bg-gray-50").on(
                     "click", lambda p=page: ui.navigate.to(f"/dashboard/{p}")
                 ):
-                    with ui.element("div").classes("w-9 h-9 rounded-lg flex items-center justify-center").style(f"background:{BRAND_SOFT};"):
-                        ui.icon(icon, size="16px").style(f"color:{BRAND};")
-                    with ui.column().classes("gap-0"):
+                    with ui.element("div").classes("w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0").style(
+                        f"background:{BRAND_SOFT};"
+                    ):
+                        ui.icon(icon, size="15px").style(f"color:{BRAND};")
+                    with ui.column().classes("gap-0 flex-1"):
                         ui.label(title).classes("text-sm font-bold text-gray-800")
                         ui.label(sub).classes("text-xs text-gray-500")
+                    ui.icon("arrow_forward", size="13px").style("color:#D1D5DB;")
+
+        ui.label("© 2024 RenderLink AI Assistant. All rights reserved.").classes("text-center text-xs text-gray-400 mt-2 w-full")
 
 
 # --------------------------------------------------------------------
@@ -403,7 +569,7 @@ def agent_page():
 
 
 # --------------------------------------------------------------------
-# FEATURES — toggles switch instantly, no save button needed
+# FEATURES — full grid page (reached via sidebar nav)
 # --------------------------------------------------------------------
 @ui.page("/dashboard/features")
 def features_page():
@@ -416,17 +582,18 @@ def features_page():
     content = _layout("features", store, cfg)
     with content:
         _page_header("Features", "Choose what your AI assistant can do for your customers.")
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            for key, label, icon in FEATURE_LIST:
-                with ui.row().classes("w-full items-center justify-between px-4 py-3 rounded-xl").style(f"background:{BRAND_SOFT};"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon(icon, size="16px").style("color:#4B5563;")
-                        ui.label(label).classes("text-sm font-medium text-gray-700")
+        with ui.card().classes(CARD_CLASSES + " p-6"):
+            with ui.grid(columns=2).classes("w-full gap-3"):
+                for key, label, icon in FEATURE_LIST:
+                    with ui.row().classes("items-center justify-between px-4 py-3 rounded-xl").style(f"background:{BRAND_SOFT};"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon(icon, size="15px").style("color:#4B5563;")
+                            ui.label(label).classes("text-sm font-medium text-gray-700")
 
-                    def on_toggle(e, k=key):
-                        repo.update_features(store["$id"], **{k: e.value})
+                        def on_toggle(e, k=key):
+                            repo.update_features(store["$id"], **{k: e.value})
 
-                    ui.switch(value=bool(features.get(key)), on_change=on_toggle).props(f'color=grey-8')
+                        ui.switch(value=bool(features.get(key)), on_change=on_toggle).props("color=grey-8")
 
 
 # --------------------------------------------------------------------
@@ -559,7 +726,7 @@ def knowledge_page():
                 if not faqs:
                     ui.label("No FAQs yet — add your first one above.").classes("text-xs text-gray-400")
                 for f in faqs:
-                    with ui.card().classes(CARD_CLASSES + " p-4 flex-row items-start justify-between"):
+                    with ui.row().classes(CARD_CLASSES + " p-4 items-start justify-between"):
                         with ui.column().classes("gap-0.5"):
                             ui.label(f["question"]).classes("text-sm font-semibold text-gray-800")
                             ui.label(f["answer"]).classes("text-xs text-gray-500")
