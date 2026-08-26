@@ -70,8 +70,11 @@ ui.run_with(app, storage_secret=os.environ.get("SESSION_SECRET", "change-me-in-p
 # middleware will still add the flag, but the browser will discard the
 # cookie anyway; that's expected and not a bug in this middleware.
 class ForceCookieSameSiteNone:
-    def __init__(self, asgi_app):
-        self.asgi_app = asgi_app
+    # NOTE: Starlette's add_middleware() always instantiates middleware as
+    # cls(app=app, **options) — the parameter MUST be named `app`, not
+    # something else, or you get "unexpected keyword argument 'app'".
+    def __init__(self, app):
+        self.asgi_app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
