@@ -372,7 +372,7 @@ def signup_page(shop: str = ""):
                 app.storage.user["store_id"] = store["$id"]
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
-                _goto("/dashboard/overview")
+                _goto("/dashboard/dashboard")
 
             ui.button("Create account", on_click=submit).props("no-caps icon-right=arrow_forward").classes(
                 "w-full mt-3"
@@ -407,7 +407,7 @@ def login_page():
                 app.storage.user["store_id"] = store_id
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
-                _goto("/dashboard/overview")
+                _goto("/dashboard/dashboard")
 
             ui.button("Log in", on_click=submit).props("no-caps").classes("w-full mt-3").style(
                 f"background:{BRAND};color:white;border-radius:10px;"
@@ -419,14 +419,14 @@ def login_page():
 
 @ui.page("/dashboard")
 def dashboard_root():
-    _goto("/dashboard/overview")
+    _goto("/dashboard/dashboard")
 
 
 # --------------------------------------------------------------------
 # OVERVIEW
 # --------------------------------------------------------------------
-@ui.page("/dashboard/overview")
-def overview_page():
+@ui.page("/dashboard/dashboard")
+def dashboard_page():
     store = _require_store()
     if not store:
         return
@@ -434,7 +434,7 @@ def overview_page():
     features = repo.ensure_features(store["$id"])
     s = STATUS_STYLES.get(cfg.get("status", "active"), STATUS_STYLES["active"])
 
-    content = _layout("overview", store, cfg)
+    content = _layout("dashboard", store, cfg)
     with content:
         _page_header("Dashboard", "Here's what's happening with your AI assistant today.")
 
