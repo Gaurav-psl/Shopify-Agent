@@ -15,6 +15,7 @@ Run: pip install nicegui
 """
 
 import os
+import time
 
 import bcrypt
 from nicegui import ui, app
@@ -35,7 +36,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY", "")
 
 NAV_ITEMS = [
-    ("overview", "Overview", "home"),
+    ("Dashboard", "Dashboard", "home"),
     ("store", "Store Information", "storefront"),
     ("agent", "AI Agent", "smart_toy"),
     ("features", "Features", "grid_view"),
@@ -130,6 +131,46 @@ def _shopify_nav_menu():
     ''')
     links_html = "".join(f'<a href="/dashboard/{key}">{label}</a>' for key, label, _ in NAV_ITEMS)
     ui.html(f"<ui-nav-menu>{links_html}</ui-nav-menu>").style("display:none;")
+
+
+# --------------------------------------------------------------------
+# Live preview — loads your ACTUAL widget.js for this shop, so what the
+# owner sees here is pixel-for-pixel what a real shopper sees on the
+# storefront (not a mockup). Reads whatever's currently saved via
+# /widget-config, same as the real embed does.
+# --------------------------------------------------------------------
+from fastapi.responses import HTMLResponse as _HTMLResponse  # noqa: E402
+
+
+@app.get("/dashboard/widget-preview")
+def widget_preview(shop: str):
+    return _HTMLResponse(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;min-height:100vh;background:#fafafa;">
+  <script src="/widget.js" data-shop="{shop}" defer></script>
+</body></html>""")
+
+
+def _open_preview(store: dict):
+    """Opens a dialog embedding the real widget for this store. Rebuilt
+    fresh (cache-busted) every time it's called, so it always reflects
+    whatever was most recently saved on Appearance/AI Agent — no stale
+    preview after an edit."""
+    ts = int(time.time())
+    with ui.dialog() as dialog:
+        with ui.card().classes("p-0 gap-0").style(
+            "width:400px;height:680px;max-width:95vw;max-height:92vh;overflow:hidden;border-radius:18px;"
+        ):
+            with ui.row().classes("w-full items-center justify-between px-4 py-2.5 flex-shrink-0").style(
+                "border-bottom:1px solid #F3F4F6;"
+            ):
+                ui.label("Live Preview — exactly what shoppers see").classes("font-bold text-gray-900 text-xs")
+                ui.button(icon="close", on_click=dialog.close).props("flat round dense").style("color:#9CA3AF;")
+            ui.html(
+                f'<iframe src="/dashboard/widget-preview?shop={store["shop_domain"]}&t={ts}" '
+                f'style="width:100%;height:100%;border:none;display:block;"></iframe>'
+            ).style("flex:1;width:100%;")
+    dialog.open()
 
 
 # --------------------------------------------------------------------
@@ -395,19 +436,21 @@ def overview_page():
 
     content = _layout("overview", store, cfg)
     with content:
-        _page_header("Overview", "Here's what's happening with your AI assistant today.")
+        _page_header("Dashboard", "Here's what's happening with your AI assistant today.")
+
+        agent_color = cfg.get("theme_color") or BRAND
 
         # ---- AI Agent card ----
         with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
             with ui.row().classes("items-center gap-2"):
-                ui.icon("smart_toy", size="18px").style(f"color:{BRAND};")
+                ui.icon("smart_toy", size="18px").style(f"color:{agent_color};")
                 ui.label("AI Agent").classes("font-bold text-gray-900")
 
             with ui.row().classes("w-full gap-6 items-start"):
                 with ui.element("div").classes("w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0").style(
                     f"background:{BRAND_SOFT};"
                 ):
-                    ui.icon("smart_toy", size="34px").style(f"color:{BRAND};")
+                    ui.icon("smart_toy", size="34px").style(f"color:{agent_color};")
 
                 with ui.row().classes("flex-1 gap-8"):
                     with ui.column().classes("gap-0.5"):
@@ -417,7 +460,7 @@ def overview_page():
                             ui.button("Edit", on_click=lambda: _goto("/dashboard/agent")).props(
                                 "no-caps flat dense"
                             ).classes("text-[11px] font-semibold px-2 py-0.5").style(
-                                f"background:{BRAND_SOFT};color:{BRAND};border-radius:999px;min-height:0;"
+                                f"background:{BRAND_SOFT};color:{agent_color};border-radius:999px;min-height:0;"
                             )
                         ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
                         ui.label(cfg.get("agent_title", "")).classes("text-sm text-gray-700 rounded-lg px-3 py-2").style(
@@ -428,7 +471,7 @@ def overview_page():
                         ui.button(
                             "Manage Agent", icon="settings", on_click=lambda: _goto("/dashboard/agent")
                         ).props("no-caps flat").classes("mt-1 text-xs font-semibold").style(
-                            f"background:{BRAND_SOFT};color:{BRAND};border-radius:8px;"
+                            f"background:{BRAND_SOFT};color:{agent_color};border-radius:8px;"
                         )
 
                     with ui.column().classes("gap-0.5"):
@@ -443,11 +486,11 @@ def overview_page():
                                 ui.label("10:30 AM").classes("text-[10px] text-gray-400")
                             with ui.element("div").classes("flex items-center justify-center").style(
                                 f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
-                                f"background:{BRAND};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
+                                f"background:{agent_color};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
                             ):
                                 ui.icon("forum", size="15px").style("color:white;")
                         ui.button(
-                            "Open full preview", icon="arrow_forward", on_click=lambda: _goto("/dashboard/appearance")
+                            "Open full preview", icon="arrow_forward", on_click=lambda: _open_preview(store)
                         ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
 
         # ---- Enabled Features (dropdown) ----
@@ -564,9 +607,13 @@ def agent_page():
                 )
                 saved_label.text = "Saved ✓"
 
-            ui.button("Save changes", on_click=save).props("no-caps").classes("mt-2").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.button("Save changes", on_click=save).props("no-caps").style(
+                    f"background:{BRAND};color:white;border-radius:10px;"
+                )
+                ui.button("Preview", icon="visibility", on_click=lambda: _open_preview(store)).props("no-caps flat").style(
+                    f"border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;"
+                )
 
 
 # --------------------------------------------------------------------
@@ -661,9 +708,13 @@ def appearance_page():
                 )
                 saved_label.text = "Saved ✓"
 
-            ui.button("Save changes", on_click=save).props("no-caps").classes("mt-2").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.button("Save changes", on_click=save).props("no-caps").style(
+                    f"background:{BRAND};color:white;border-radius:10px;"
+                )
+                ui.button("Preview", icon="visibility", on_click=lambda: _open_preview(store)).props("no-caps flat").style(
+                    f"border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;"
+                )
 
         with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
             ui.label("Custom icon image").classes("text-xs font-semibold text-gray-600")
