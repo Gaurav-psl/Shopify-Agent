@@ -407,7 +407,7 @@ def login_page():
                 app.storage.user["store_id"] = store_id
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
-                _goto("/dashboard/dashboard")
+                _goto("/dashboard/Dashboard")
 
             ui.button("Log in", on_click=submit).props("no-caps").classes("w-full mt-3").style(
                 f"background:{BRAND};color:white;border-radius:10px;"
@@ -419,13 +419,13 @@ def login_page():
 
 @ui.page("/dashboard")
 def dashboard_root():
-    _goto("/dashboard/dashboard")
+    _goto("/dashboard/Dashboard")
 
 
 # --------------------------------------------------------------------
 # OVERVIEW
 # --------------------------------------------------------------------
-@ui.page("/dashboard/dashboard")
+@ui.page("/dashboard/Dashboard")
 def dashboard_page():
     store = _require_store()
     if not store:
