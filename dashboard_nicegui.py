@@ -81,18 +81,38 @@ def _current_store() -> dict | None:
 def _require_store():
     store = _current_store()
     if not store:
-        ui.navigate.to("/dashboard/login")
+        _goto("/dashboard/login")
         return None
     return store
 
 
 def _logout():
     app.storage.user.clear()
-    ui.navigate.to("/dashboard/login")
+    _goto("/dashboard/login")
 
 
 def _initial(store: dict) -> str:
     return (app.storage.user.get("email") or store["shop_domain"])[0].upper()
+
+
+def _goto(path: str):
+    """Navigates to an internal /dashboard/... path while preserving the
+    shop/host/embedded query params Shopify attaches when it first loads
+    the app in its iframe. Dropping these on a full page load (which is
+    what every @ui.page navigation is) breaks App Bridge's ability to
+    re-initialize on the next page — which is why the nav menu can
+    silently vanish after any in-app navigation. Always use this instead
+    of calling ui.navigate.to directly for internal /dashboard links."""
+    try:
+        request = ui.context.client.request
+        params = {k: v for k, v in request.query_params.items() if k in ("shop", "host", "embedded", "session", "id_token")}
+    except Exception:
+        params = {}
+    if params:
+        from urllib.parse import urlencode
+        sep = "&" if "?" in path else "?"
+        path = f"{path}{sep}{urlencode(params)}"
+    ui.navigate.to(path)
 
 
 def _shopify_nav_menu():
@@ -159,7 +179,7 @@ def _layout(active_key: str, store: dict, agent: dict):
                 "px-3 py-1.5 text-xs font-semibold"
             ).style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
 
-            ui.button("Help", icon="help_outline", on_click=lambda: ui.navigate.to("/dashboard/feedback")).props(
+            ui.button("Help", icon="help_outline", on_click=lambda: _goto("/dashboard/feedback")).props(
                 "no-caps flat"
             ).classes("px-3 py-1.5 text-xs font-semibold").style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
 
@@ -181,7 +201,9 @@ def _layout(active_key: str, store: dict, agent: dict):
     # above) registers the same links via App Bridge, and Shopify renders
     # them nested under the app's name in its own sidebar instead.
 
-    content = ui.column().classes("w-full max-w-3xl mx-auto p-6 gap-4")
+    # Wider now that there's no in-frame sidebar taking up the left side —
+    # mx-auto keeps the margins equal on both sides as it grows.
+    content = ui.column().classes("w-full max-w-5xl mx-auto p-8 gap-4")
     return content
 
 
@@ -309,7 +331,7 @@ def signup_page(shop: str = ""):
                 app.storage.user["store_id"] = store["$id"]
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
-                ui.navigate.to("/dashboard/overview")
+                _goto("/dashboard/overview")
 
             ui.button("Create account", on_click=submit).props("no-caps icon-right=arrow_forward").classes(
                 "w-full mt-3"
@@ -344,7 +366,7 @@ def login_page():
                 app.storage.user["store_id"] = store_id
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
-                ui.navigate.to("/dashboard/overview")
+                _goto("/dashboard/overview")
 
             ui.button("Log in", on_click=submit).props("no-caps").classes("w-full mt-3").style(
                 f"background:{BRAND};color:white;border-radius:10px;"
@@ -356,7 +378,7 @@ def login_page():
 
 @ui.page("/dashboard")
 def dashboard_root():
-    ui.navigate.to("/dashboard/overview")
+    _goto("/dashboard/overview")
 
 
 # --------------------------------------------------------------------
@@ -392,7 +414,7 @@ def overview_page():
                         ui.label("Agent Name").classes("text-xs text-gray-500")
                         with ui.row().classes("items-center gap-2"):
                             ui.label(cfg.get("agent_name", "")).classes("font-bold text-gray-900")
-                            ui.button("Edit", on_click=lambda: ui.navigate.to("/dashboard/agent")).props(
+                            ui.button("Edit", on_click=lambda: _goto("/dashboard/agent")).props(
                                 "no-caps flat dense"
                             ).classes("text-[11px] font-semibold px-2 py-0.5").style(
                                 f"background:{BRAND_SOFT};color:{BRAND};border-radius:999px;min-height:0;"
@@ -404,7 +426,7 @@ def overview_page():
                         ui.label("Status").classes("text-xs text-gray-500 mt-2")
                         ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
                         ui.button(
-                            "Manage Agent", icon="settings", on_click=lambda: ui.navigate.to("/dashboard/agent")
+                            "Manage Agent", icon="settings", on_click=lambda: _goto("/dashboard/agent")
                         ).props("no-caps flat").classes("mt-1 text-xs font-semibold").style(
                             f"background:{BRAND_SOFT};color:{BRAND};border-radius:8px;"
                         )
@@ -425,7 +447,7 @@ def overview_page():
                             ):
                                 ui.icon("forum", size="15px").style("color:white;")
                         ui.button(
-                            "Open full preview", icon="arrow_forward", on_click=lambda: ui.navigate.to("/dashboard/appearance")
+                            "Open full preview", icon="arrow_forward", on_click=lambda: _goto("/dashboard/appearance")
                         ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
 
         # ---- Enabled Features (dropdown) ----
@@ -445,7 +467,7 @@ def overview_page():
             ]
             for icon, title, sub, page in quick:
                 with ui.row().classes("w-full items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer hover:bg-gray-50").on(
-                    "click", lambda p=page: ui.navigate.to(f"/dashboard/{p}")
+                    "click", lambda p=page: _goto(f"/dashboard/{p}")
                 ):
                     with ui.element("div").classes("w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0").style(
                         f"background:{BRAND_SOFT};"
