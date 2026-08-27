@@ -18,6 +18,7 @@ import os
 import time
 
 import bcrypt
+import httpx
 from nicegui import ui, app
 
 import repository_appwrite as repo
@@ -138,17 +139,89 @@ def _shopify_nav_menu():
 # owner sees here is pixel-for-pixel what a real shopper sees on the
 # storefront (not a mockup). Reads whatever's currently saved via
 # /widget-config, same as the real embed does.
+#
+# The preview backdrop is the merchant's REAL homepage: we fetch its
+# HTML server-side (so the browser never has to iframe a third-party
+# origin directly — no X-Frame-Options/CSP-frame-ancestors issues,
+# since we re-serve it from our own domain), inject a <base> tag so
+# relative asset URLs (css/js/images) still resolve against the real
+# store, strip any CSP <meta> tag the theme sets (it would otherwise
+# block our own injected <script>), and then inject the real widget
+# script right before </body> — the widget then calls /widget-config
+# itself and renders with whatever's currently saved (agent name,
+# welcome message, theme color, icon, position). If the homepage can't
+# be fetched for any reason, we fall back to the old blank canvas with
+# a small note so the widget itself is still previewable.
 # --------------------------------------------------------------------
+import re  # noqa: E402
 from fastapi.responses import HTMLResponse as _HTMLResponse  # noqa: E402
+
+_CSP_META_RE = re.compile(
+    r'<meta[^>]+http-equiv=["\']content-security-policy["\'][^>]*>',
+    re.IGNORECASE,
+)
+
+
+def _blank_preview_html(shop: str, note: str = "") -> str:
+    banner = (
+        f'<div style="position:fixed;top:0;left:0;right:0;padding:8px 14px;'
+        f'background:#FEF3C7;color:#92400E;font:12px -apple-system,sans-serif;'
+        f'z-index:99999;">{note}</div>'
+        if note else ""
+    )
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;min-height:100vh;background:#fafafa;">
+  {banner}
+  <script src="/widget.js" data-shop="{shop}" defer></script>
+</body></html>"""
 
 
 @app.get("/dashboard/widget-preview")
-def widget_preview(shop: str):
-    return _HTMLResponse(f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"></head>
-<body style="margin:0;min-height:100vh;background:#fafafa;">
-  <script src="/widget.js" data-shop="{shop}" defer></script>
-</body></html>""")
+async def widget_preview(shop: str):
+    home_url = f"https://{shop}/"
+    widget_tag = f'<script src="/widget.js" data-shop="{shop}" defer></script>'
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
+            resp = await client.get(
+                home_url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; RenderLinkPreview/1.0)"},
+            )
+        resp.raise_for_status()
+        html = resp.text
+
+        # Strip any theme CSP meta tag so it can't block our injected script.
+        html = _CSP_META_RE.sub("", html)
+
+        # Make relative asset URLs (css/js/images) resolve against the real
+        # store, since we're now serving this HTML from our own domain.
+        if "<head>" in html:
+            html = html.replace("<head>", f'<head><base href="{home_url}">', 1)
+        elif "<head " in html:
+            html = re.sub(r"(<head[^>]*>)", rf'\1<base href="{home_url}">', html, count=1)
+        else:
+            html = f'<base href="{home_url}">' + html
+
+        # Inject the real widget script right before </body> (or append at
+        # the end if the fetched page has no closing body tag).
+        if "</body>" in html:
+            html = html.replace("</body>", f"{widget_tag}</body>", 1)
+        else:
+            html += widget_tag
+
+        return _HTMLResponse(html)
+
+    except Exception:
+        # Homepage couldn't be fetched (site down, password-protected,
+        # blocks server-side requests, etc.) — fall back to a blank
+        # canvas so the widget is still previewable.
+        return _HTMLResponse(
+            _blank_preview_html(
+                shop,
+                note="Couldn't load your storefront homepage for this preview — showing the widget on a blank canvas instead.",
+            )
+        )
 
 
 def _open_preview(store: dict):
@@ -159,13 +232,22 @@ def _open_preview(store: dict):
     ts = int(time.time())
     with ui.dialog() as dialog:
         with ui.card().classes("p-0 gap-0").style(
-            "width:400px;height:680px;max-width:95vw;max-height:92vh;overflow:hidden;border-radius:18px;"
+            "width:1040px;height:720px;max-width:96vw;max-height:94vh;overflow:hidden;border-radius:18px;"
         ):
             with ui.row().classes("w-full items-center justify-between px-4 py-2.5 flex-shrink-0").style(
                 "border-bottom:1px solid #F3F4F6;"
             ):
-                ui.label("Live Preview — exactly what shoppers see").classes("font-bold text-gray-900 text-xs")
+                ui.label("Live Preview — exactly what shoppers see on your site").classes(
+                    "font-bold text-gray-900 text-xs"
+                )
                 ui.button(icon="close", on_click=dialog.close).props("flat round dense").style("color:#9CA3AF;")
+            # A thin fake browser address bar makes it read as "your actual
+            # site" rather than an arbitrary popup.
+            with ui.row().classes("w-full items-center gap-2 px-4 py-1.5 flex-shrink-0").style(
+                "background:#F9FAFB;border-bottom:1px solid #F3F4F6;"
+            ):
+                ui.icon("lock").classes("text-gray-400").style("font-size:12px;")
+                ui.label(store["shop_domain"]).classes("text-xs text-gray-500")
             ui.html(
                 f'<iframe src="/dashboard/widget-preview?shop={store["shop_domain"]}&t={ts}" '
                 f'style="width:100%;height:100%;border:none;display:block;"></iframe>'
@@ -432,66 +514,10 @@ def dashboard_page():
         return
     cfg = repo.ensure_customization(store["$id"])
     features = repo.ensure_features(store["$id"])
-    s = STATUS_STYLES.get(cfg.get("status", "active"), STATUS_STYLES["active"])
 
     content = _layout("dashboard", store, cfg)
     with content:
         _page_header("Dashboard", "Here's what's happening with your AI assistant today.")
-
-        agent_color = cfg.get("theme_color") or BRAND
-
-        # ---- AI Agent card ----
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("smart_toy", size="18px").style(f"color:{agent_color};")
-                ui.label("AI Agent").classes("font-bold text-gray-900")
-
-            with ui.row().classes("w-full gap-6 items-start"):
-                with ui.element("div").classes("w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0").style(
-                    f"background:{BRAND_SOFT};"
-                ):
-                    ui.icon("smart_toy", size="34px").style(f"color:{agent_color};")
-
-                with ui.row().classes("flex-1 gap-8"):
-                    with ui.column().classes("gap-0.5"):
-                        ui.label("Agent Name").classes("text-xs text-gray-500")
-                        with ui.row().classes("items-center gap-2"):
-                            ui.label(cfg.get("agent_name", "")).classes("font-bold text-gray-900")
-                            ui.button("Edit", on_click=lambda: _goto("/dashboard/agent")).props(
-                                "no-caps flat dense"
-                            ).classes("text-[11px] font-semibold px-2 py-0.5").style(
-                                f"background:{BRAND_SOFT};color:{agent_color};border-radius:999px;min-height:0;"
-                            )
-                        ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
-                        ui.label(cfg.get("agent_title", "")).classes("text-sm text-gray-700 rounded-lg px-3 py-2").style(
-                            "background:#F9FAFB;"
-                        )
-                        ui.label("Status").classes("text-xs text-gray-500 mt-2")
-                        ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
-                        ui.button(
-                            "Manage Agent", icon="settings", on_click=lambda: _goto("/dashboard/agent")
-                        ).props("no-caps flat").classes("mt-1 text-xs font-semibold").style(
-                            f"background:{BRAND_SOFT};color:{agent_color};border-radius:8px;"
-                        )
-
-                    with ui.column().classes("gap-0.5"):
-                        with ui.row().classes("items-center gap-1.5"):
-                            ui.icon("desktop_windows", size="13px").style("color:#6B7280;")
-                            ui.label("Widget Live Preview").classes("text-xs text-gray-500")
-                        with ui.column().classes("relative p-3 gap-0").style(f"background:{BRAND_SOFT};border-radius:12px;height:128px;width:220px;"):
-                            with ui.column().classes("p-2.5 gap-0").style(
-                                "background:white;border-radius:12px;border-top-left-radius:0;box-shadow:0 1px 2px rgba(0,0,0,0.06);max-width:85%;"
-                            ):
-                                ui.label(cfg.get("agent_title", "")).classes("text-xs text-gray-800")
-                                ui.label("10:30 AM").classes("text-[10px] text-gray-400")
-                            with ui.element("div").classes("flex items-center justify-center").style(
-                                f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
-                                f"background:{agent_color};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
-                            ):
-                                ui.icon("forum", size="15px").style("color:white;")
-                        ui.button(
-                            "Open full preview", icon="arrow_forward", on_click=lambda: _open_preview(store)
-                        ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
 
         # ---- Enabled Features (dropdown) ----
         with ui.card().classes(CARD_CLASSES + " p-2"):
@@ -571,49 +597,141 @@ def agent_page():
     content = _layout("agent", store, cfg)
     with content:
         _page_header("AI Agent", "How your assistant introduces itself, behaves, and whether it's live.")
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            name = ui.input("Agent name", value=cfg.get("agent_name", "")).classes("w-full")
-            welcome = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
-            instructions = ui.textarea("Agent instructions", value=cfg.get("instructions", "")).classes("w-full").props("rows=5")
 
-            ui.label("Status").classes("text-xs font-semibold text-gray-600 mt-2")
-            status_value = {"v": cfg.get("status", "active")}
-            with ui.row().classes("gap-2") as status_row:
-                pass
+        agent_color = cfg.get("theme_color") or BRAND
+        s = STATUS_STYLES.get(cfg.get("status", "active"), STATUS_STYLES["active"])
 
-            def render_status_buttons():
-                status_row.clear()
-                with status_row:
-                    for key, s in STATUS_STYLES.items():
-                        selected = status_value["v"] == key
-                        b = ui.button(s["label"], on_click=lambda k=key: (status_value.update(v=k), render_status_buttons())).props("no-caps flat")
-                        if selected:
-                            b.style(f"background:{s['bg']};color:{s['text']};border-radius:999px;border:1px solid {s['dot']};")
-                        else:
-                            b.style("background:white;color:#6B7280;border-radius:999px;border:1px solid #E5E7EB;")
+        # ---- Display card (moved here from Dashboard) — read-only, with
+        #      the embedded Live Preview. Clicking Edit/Customize opens
+        #      the popup below where the actual changes are made. ----
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("smart_toy", size="18px").style(f"color:{agent_color};")
+                ui.label("AI Agent").classes("font-bold text-gray-900")
 
-            render_status_buttons()
-            ui.label('"Inactive" or "Maintenance" stops the widget from responding to shoppers.').classes("text-[11px] text-gray-400")
+            with ui.row().classes("w-full gap-6 items-start"):
+                with ui.element("div").classes("w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0").style(
+                    f"background:{BRAND_SOFT};"
+                ):
+                    ui.icon("smart_toy", size="34px").style(f"color:{agent_color};")
 
-            saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
+                with ui.row().classes("flex-1 gap-8"):
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("Agent Name").classes("text-xs text-gray-500")
+                        with ui.row().classes("items-center gap-2"):
+                            name_label = ui.label(cfg.get("agent_name", "")).classes("font-bold text-gray-900")
+                            edit_btn = ui.button("Edit").props("no-caps flat dense").classes(
+                                "text-[11px] font-semibold px-2 py-0.5"
+                            ).style(f"background:{BRAND_SOFT};color:{agent_color};border-radius:999px;min-height:0;")
+                        ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
+                        welcome_label = ui.label(cfg.get("agent_title", "")).classes(
+                            "text-sm text-gray-700 rounded-lg px-3 py-2"
+                        ).style("background:#F9FAFB;")
+                        ui.label("Status").classes("text-xs text-gray-500 mt-2")
+                        status_badge = ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
+                        manage_btn = ui.button("Customize Agent", icon="edit").props("no-caps flat").classes(
+                            "mt-1 text-xs font-semibold"
+                        ).style(f"background:{BRAND_SOFT};color:{agent_color};border-radius:8px;")
 
-            def save():
-                repo.update_customization(
-                    store["$id"],
-                    agent_name=name.value.strip() or "AI Assistant",
-                    agent_title=welcome.value.strip() or "How can I help you today?",
-                    instructions=instructions.value.strip(),
-                    status=status_value["v"],
+                    with ui.column().classes("gap-0.5"):
+                        with ui.row().classes("items-center gap-1.5"):
+                            ui.icon("desktop_windows", size="13px").style("color:#6B7280;")
+                            ui.label("Widget Live Preview").classes("text-xs text-gray-500")
+                        with ui.column().classes("relative p-3 gap-0").style(
+                            f"background:{BRAND_SOFT};border-radius:12px;height:128px;width:220px;"
+                        ):
+                            with ui.column().classes("p-2.5 gap-0").style(
+                                "background:white;border-radius:12px;border-top-left-radius:0;box-shadow:0 1px 2px rgba(0,0,0,0.06);max-width:85%;"
+                            ):
+                                preview_msg_label = ui.label(cfg.get("agent_title", "")).classes("text-xs text-gray-800")
+                                ui.label("10:30 AM").classes("text-[10px] text-gray-400")
+                            with ui.element("div").classes("flex items-center justify-center").style(
+                                f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
+                                f"background:{agent_color};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
+                            ):
+                                ui.icon("forum", size="15px").style("color:white;")
+                        ui.button(
+                            "Open full preview", icon="arrow_forward", on_click=lambda: _open_preview(store)
+                        ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
+
+        # ---- Customize popup — this is where changes actually happen ----
+        def open_customize_dialog():
+            with ui.dialog() as dialog, ui.card().classes("p-6 gap-2 w-full max-w-md"):
+                ui.label("Customize Agent").classes("text-lg font-bold text-gray-900")
+                ui.label("Update how your assistant appears and behaves.").classes("text-xs text-gray-500 mb-2")
+
+                name_input = ui.input("Agent name", value=cfg.get("agent_name", "")).classes("w-full")
+                welcome_input = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
+                instructions_input = ui.textarea("Agent instructions", value=cfg.get("instructions", "")).classes(
+                    "w-full"
+                ).props("rows=5")
+
+                ui.label("Status").classes("text-xs font-semibold text-gray-600 mt-1")
+                status_value = {"v": cfg.get("status", "active")}
+                with ui.row().classes("gap-2") as status_row:
+                    pass
+
+                def render_status_buttons():
+                    status_row.clear()
+                    with status_row:
+                        for key, st in STATUS_STYLES.items():
+                            selected = status_value["v"] == key
+                            b = ui.button(
+                                st["label"], on_click=lambda k=key: (status_value.update(v=k), render_status_buttons())
+                            ).props("no-caps flat")
+                            if selected:
+                                b.style(f"background:{st['bg']};color:{st['text']};border-radius:999px;border:1px solid {st['dot']};")
+                            else:
+                                b.style("background:white;color:#6B7280;border-radius:999px;border:1px solid #E5E7EB;")
+
+                render_status_buttons()
+                ui.label('"Inactive" or "Maintenance" stops the widget from responding to shoppers.').classes(
+                    "text-[11px] text-gray-400"
                 )
-                saved_label.text = "Saved ✓"
 
-            with ui.row().classes("items-center gap-2 mt-2"):
-                ui.button("Save changes", on_click=save).props("no-caps").style(
-                    f"background:{BRAND};color:white;border-radius:10px;"
-                )
-                ui.button("Preview", icon="visibility", on_click=lambda: _open_preview(store)).props("no-caps flat").style(
-                    f"border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;"
-                )
+                error_label = ui.label("").classes("text-xs text-gray-500 mt-1")
+
+                def save():
+                    new_name = name_input.value.strip() or "AI Assistant"
+                    new_welcome = welcome_input.value.strip() or "How can I help you today?"
+                    new_instructions = instructions_input.value.strip()
+                    new_status = status_value["v"]
+
+                    repo.update_customization(
+                        store["$id"],
+                        agent_name=new_name,
+                        agent_title=new_welcome,
+                        instructions=new_instructions,
+                        status=new_status,
+                    )
+
+                    # reflect the change immediately, no page reload needed
+                    cfg["agent_name"] = new_name
+                    cfg["agent_title"] = new_welcome
+                    cfg["instructions"] = new_instructions
+                    cfg["status"] = new_status
+
+                    name_label.text = new_name
+                    welcome_label.text = new_welcome
+                    preview_msg_label.text = new_welcome
+                    new_s = STATUS_STYLES.get(new_status, STATUS_STYLES["active"])
+                    status_badge.text = new_s["label"]
+                    status_badge.style(f"background:{new_s['bg']};color:{new_s['text']};")
+
+                    dialog.close()
+                    ui.notify("Agent updated ✓", type="positive")
+
+                with ui.row().classes("gap-2 mt-3 w-full justify-end"):
+                    ui.button("Cancel", on_click=dialog.close).props("no-caps flat").style(
+                        "color:#6B7280;"
+                    )
+                    ui.button("Save changes", on_click=save).props("no-caps").style(
+                        f"background:{BRAND};color:white;border-radius:10px;"
+                    )
+            dialog.open()
+
+        edit_btn.on_click(open_customize_dialog)
+        manage_btn.on_click(open_customize_dialog)
 
 
 # --------------------------------------------------------------------
