@@ -15,7 +15,7 @@ import os
 import json
 from openai import OpenAI
 
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen-8B-AWQ")
 
 _client = None
 
