@@ -1,43 +1,41 @@
 """
 repository_appwrite.py
 ------------------------
-Same function names and signatures as the SQLAlchemy repository.py, so
-main.py's route handlers don't need to change — only the import line
-does: `import repository_appwrite as repo` instead of `import repository`.
+Same function names and signatures as before — main.py's route handlers
+don't need to change.
 
-NEW IN THIS VERSION (to support the rich "RenderLink" dashboard UI):
-  - ensure_customization() now also seeds `instructions`, `status`,
-    and `widget_position` alongside the existing agent_name/agent_title/
-    icon_type/theme_color/custom_icon_url fields.
-  - get_dashboard_user_by_id() — needed because the dashboard now shows
-    the logged-in owner's email in the sidebar/topbar.
-  - Features, Store Info, FAQs, and Feedback: new collections + CRUD
-    functions, mirroring the existing ensure_customization/
-    update_customization pattern.
+FIXED IN THIS VERSION: every "store" field that used to be an Appwrite
+RELATIONSHIP attribute has been switched to a plain, indexed STRING
+attribute named "store_id". Relationship attributes index
+asynchronously — querying one immediately after creating/updating it
+can return "not found" for a brief window, which was causing
+ensure_customization() / ensure_features() / ensure_store_info() to
+create duplicate documents (the "changes save but don't show up next
+time" bug). Plain string attributes with a `key` (non-unique) index are
+queryable the instant the write completes — no race condition, no
+duplicates.
 
->>> ACTION NEEDED IN appwrite_client.py <<<
-Add these four new collection ID constants (create the matching
-collections in your Appwrite console first) and import them below:
+>>> ACTION NEEDED IN APPWRITE <<<
+Run migrate_relationship_to_store_id.py (companion script) once. It:
+  1. Adds a plain string `store_id` attribute + index to every affected
+     collection (dashboard_users, flows, request_logs,
+     agent_customizations, features, store_info, faqs, feedback)
+  2. Backfills store_id on every EXISTING document by resolving the old
+     `store` relationship field
+The old `store` relationship attributes are left in place afterwards
+(harmless, just unused) — removing attributes has its own timing quirks,
+so that cleanup is optional and manual via the console if you want it.
 
-    FEATURES_COLLECTION       — one doc per store. Boolean attributes:
-                                 product_search, recommendations,
-                                 product_filtering, warranty,
-                                 cart_editing, returns, track_orders.
-                                 Plus a `store` relationship/string attr.
-    STORE_INFO_COLLECTION     — one doc per store. String attributes:
-                                 business_name, support_email, timezone.
-                                 Plus a `store` relationship/string attr.
-    FAQS_COLLECTION           — many docs per store. String attributes:
-                                 question, answer. Plus `store`.
-    FEEDBACK_COLLECTION       — many docs per store (write-mostly).
-                                 String attribute: message. Plus `store`.
-
-Also add `instructions` (string, large), `status` (string, default
-"active"), and `widget_position` (string, default "bottom-right") as
-attributes on your existing CUSTOMIZATIONS_COLLECTION.
+REQUIRED NEW APPWRITE ATTRIBUTES (in appwrite_client.py, same as before):
+    FEATURES_COLLECTION, STORE_INFO_COLLECTION, FAQS_COLLECTION,
+    FEEDBACK_COLLECTION — see migrate_relationship_to_store_id.py for
+    the exact attributes each needs.
 """
 
 import json
+import secrets
+from datetime import datetime, timedelta, timezone
+
 from appwrite.query import Query
 from appwrite.id import ID
 from appwrite.exception import AppwriteException
@@ -58,8 +56,6 @@ def _find_store_doc(shop_domain: str):
 
 
 def get_store(shop_domain: str) -> dict | None:
-    """Returns the raw store document (not just the token), for callers
-    that need more than the access token — e.g. checking is_new_store."""
     doc = _find_store_doc(shop_domain)
     if doc and doc.get("uninstalled"):
         return None
@@ -103,10 +99,6 @@ def mark_shop_uninstalled(shop_domain: str) -> None:
 
 
 def delete_shop(shop_domain: str) -> None:
-    """Used by the shop/redact GDPR webhook — permanently removes the
-    store and, since Appwrite relationship attributes can cascade,
-    optionally its related documents too (configure on_delete when
-    creating the relationship if you want automatic cascade)."""
     doc = _find_store_doc(shop_domain)
     if doc:
         databases.delete_document(DATABASE_ID, STORES_COLLECTION, doc["$id"])
@@ -121,7 +113,7 @@ def save_flow(shop_domain: str, intent: str, action: str, url: str, steps: list)
 
     existing = databases.list_documents(
         DATABASE_ID, FLOWS_COLLECTION,
-        queries=[Query.equal("intent", intent), Query.equal("action", action), Query.equal("store", store["$id"])],
+        queries=[Query.equal("intent", intent), Query.equal("action", action), Query.equal("store_id", store["$id"])],
     )
     steps_json = json.dumps(steps)
 
@@ -132,7 +124,7 @@ def save_flow(shop_domain: str, intent: str, action: str, url: str, steps: list)
         )
     return databases.create_document(
         DATABASE_ID, FLOWS_COLLECTION, ID.unique(),
-        data={"intent": intent, "action": action, "url": url, "steps_json": steps_json, "store": store["$id"]},
+        data={"intent": intent, "action": action, "url": url, "steps_json": steps_json, "store_id": store["$id"]},
     )
 
 
@@ -142,7 +134,7 @@ def get_flow(shop_domain: str, intent: str, action: str) -> dict | None:
         return None
     result = databases.list_documents(
         DATABASE_ID, FLOWS_COLLECTION,
-        queries=[Query.equal("intent", intent), Query.equal("action", action), Query.equal("store", store["$id"])],
+        queries=[Query.equal("intent", intent), Query.equal("action", action), Query.equal("store_id", store["$id"])],
     )
     if not result["documents"]:
         return None
@@ -162,7 +154,7 @@ def log_request(shop_domain: str, message: str, status: str, detected_intent=Non
             "detected_intent": detected_intent,
             "detected_action": detected_action,
             "reply": reply,
-            "store": store["$id"] if store else None,
+            "store_id": store["$id"] if store else None,
         },
     )
 
@@ -172,7 +164,7 @@ def log_request(shop_domain: str, message: str, status: str, detected_intent=Non
 def has_dashboard_user(store_id: str) -> bool:
     result = databases.list_documents(
         DATABASE_ID, DASHBOARD_USERS_COLLECTION,
-        queries=[Query.equal("store", store_id)],
+        queries=[Query.equal("store_id", store_id)],
     )
     return len(result["documents"]) > 0
 
@@ -197,7 +189,7 @@ def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict
     normalized = (email or "").strip().lower()
     return databases.create_document(
         DATABASE_ID, DASHBOARD_USERS_COLLECTION, ID.unique(),
-        data={"store": store_id, "email": normalized, "password_hash": password_hash},
+        data={"store_id": store_id, "email": normalized, "password_hash": password_hash},
     )
 
 
@@ -206,22 +198,19 @@ def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict
 def get_customization(store_id: str) -> dict | None:
     result = databases.list_documents(
         DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
-        queries=[Query.equal("store", store_id)],
+        queries=[Query.equal("store_id", store_id)],
     )
     return result["documents"][0] if result["documents"] else None
 
 
 def ensure_customization(store_id: str) -> dict:
-    """Creates a default customization row if one doesn't exist yet —
-    called right after install, same as your old code did in the same
-    db.commit() as creating the Store row."""
     existing = get_customization(store_id)
     if existing:
         return existing
     return databases.create_document(
         DATABASE_ID, CUSTOMIZATIONS_COLLECTION, ID.unique(),
         data={
-            "store": store_id,
+            "store_id": store_id,
             "agent_name": "AI Assistant",
             "agent_title": "How can I help you today?",
             "theme_color": "#2b2b2b",
@@ -259,7 +248,7 @@ _DEFAULT_FEATURES = {
 def get_features(store_id: str) -> dict | None:
     result = databases.list_documents(
         DATABASE_ID, FEATURES_COLLECTION,
-        queries=[Query.equal("store", store_id)],
+        queries=[Query.equal("store_id", store_id)],
     )
     return result["documents"][0] if result["documents"] else None
 
@@ -270,7 +259,7 @@ def ensure_features(store_id: str) -> dict:
         return existing
     return databases.create_document(
         DATABASE_ID, FEATURES_COLLECTION, ID.unique(),
-        data={"store": store_id, **_DEFAULT_FEATURES},
+        data={"store_id": store_id, **_DEFAULT_FEATURES},
     )
 
 
@@ -284,7 +273,7 @@ def update_features(store_id: str, **fields) -> dict:
 def get_store_info(store_id: str) -> dict | None:
     result = databases.list_documents(
         DATABASE_ID, STORE_INFO_COLLECTION,
-        queries=[Query.equal("store", store_id)],
+        queries=[Query.equal("store_id", store_id)],
     )
     return result["documents"][0] if result["documents"] else None
 
@@ -295,7 +284,7 @@ def ensure_store_info(store_id: str) -> dict:
         return existing
     return databases.create_document(
         DATABASE_ID, STORE_INFO_COLLECTION, ID.unique(),
-        data={"store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"},
+        data={"store_id": store_id, "business_name": "", "support_email": "", "timezone": "UTC"},
     )
 
 
@@ -309,7 +298,7 @@ def update_store_info(store_id: str, **fields) -> dict:
 def list_faqs(store_id: str) -> list[dict]:
     result = databases.list_documents(
         DATABASE_ID, FAQS_COLLECTION,
-        queries=[Query.equal("store", store_id), Query.order_asc("$createdAt")],
+        queries=[Query.equal("store_id", store_id), Query.order_asc("$createdAt")],
     )
     return result["documents"]
 
@@ -317,7 +306,7 @@ def list_faqs(store_id: str) -> list[dict]:
 def add_faq(store_id: str, question: str, answer: str) -> dict:
     return databases.create_document(
         DATABASE_ID, FAQS_COLLECTION, ID.unique(),
-        data={"store": store_id, "question": question, "answer": answer},
+        data={"store_id": store_id, "question": question, "answer": answer},
     )
 
 
@@ -328,8 +317,7 @@ def delete_faq(store_id: str, faq_id: str) -> bool:
         doc = databases.get_document(DATABASE_ID, FAQS_COLLECTION, faq_id)
     except AppwriteException:
         return False
-    owner_id = doc["store"]["$id"] if isinstance(doc.get("store"), dict) else doc.get("store")
-    if owner_id != store_id:
+    if doc.get("store_id") != store_id:
         return False
     databases.delete_document(DATABASE_ID, FAQS_COLLECTION, faq_id)
     return True
@@ -340,31 +328,11 @@ def delete_faq(store_id: str, faq_id: str) -> bool:
 def submit_feedback(store_id: str, message: str) -> dict:
     return databases.create_document(
         DATABASE_ID, FEEDBACK_COLLECTION, ID.unique(),
-        data={"store": store_id, "message": message},
+        data={"store_id": store_id, "message": message},
     )
-"""
-ADDITIONS FOR repository_appwrite.py
--------------------------------------
-Append these functions to your existing repository_appwrite.py — they
-assume the same `databases`, `DATABASE_ID`, `STORES_COLLECTION`,
-`DASHBOARD_USERS_COLLECTION`, and `Query`/`ID` imports your file
-already has.
 
-REQUIRED NEW APPWRITE ATTRIBUTES (add these in the Appwrite console,
-or via setup_collections.py if you're re-running it):
 
-  On the `stores` collection:
-    - setup_completed   (boolean, default: false)
-
-  On the `dashboard_users` collection:
-    - reset_token           (string, size 255, not required)
-    - reset_token_expires   (string, size 64, not required)  -- stored
-                              as an ISO datetime string
-"""
-
-import secrets
-from datetime import datetime, timedelta, timezone
-
+# --- Setup-completion flag ---
 
 def is_setup_complete(store: dict) -> bool:
     return bool(store.get("setup_completed"))
@@ -376,11 +344,9 @@ def mark_setup_complete(store_id: str) -> dict:
     )
 
 
+# --- Password reset ---
+
 def create_password_reset_token(email: str) -> str | None:
-    """Returns a fresh reset token if the email matches a real dashboard
-    user, or None if it doesn't. Callers should show the SAME message
-    either way ("if that email exists, we sent a link") — never reveal
-    whether an email is registered, that's a real security leak."""
     user = get_dashboard_user_by_email(email)
     if not user:
         return None
@@ -394,8 +360,6 @@ def create_password_reset_token(email: str) -> str | None:
 
 
 def get_dashboard_user_by_reset_token(token: str) -> dict | None:
-    """Returns the user if the token is valid AND not expired. A token
-    older than 1 hour is treated as if it doesn't exist at all."""
     result = databases.list_documents(
         DATABASE_ID, DASHBOARD_USERS_COLLECTION,
         queries=[Query.equal("reset_token", token)],
@@ -409,15 +373,13 @@ def get_dashboard_user_by_reset_token(token: str) -> dict | None:
         return None
     try:
         if datetime.fromisoformat(expires) < datetime.now(timezone.utc):
-            return None  # expired
+            return None
     except ValueError:
         return None
     return user
 
 
 def reset_password(user_id: str, new_password_hash: str) -> None:
-    """Sets the new password AND invalidates the reset token — a token
-    must only ever be usable once."""
     databases.update_document(
         DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id,
         data={"password_hash": new_password_hash, "reset_token": None, "reset_token_expires": None},
