@@ -17,7 +17,7 @@ from pathlib import Path
 from openai import OpenAI
 
 SCHEMA_PATH = Path(__file__).parent / "intent_schema.json"
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
 
 _client = None
 
