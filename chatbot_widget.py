@@ -99,6 +99,21 @@ def _get_store(shop: str) -> SimpleNamespace | None:
     return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
 
 
+def _get_store_safe(shop: str) -> SimpleNamespace | None:
+    """Same as _get_store, but never lets an Appwrite-level failure
+    (bad database/collection id, permissions, network hiccup, ...)
+    escape as a raw 500. Every caller in this file uses this instead of
+    _get_store directly — a failure here used to crash the whole
+    request before either /chat's or /confirm's own try/except blocks
+    got a chance to run, which is what turned a real backend error into
+    the widget's generic "could not reach the server" message."""
+    try:
+        return _get_store(shop)
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: _get_store failed for shop={shop!r}: {e}")
+        return None
+
+
 async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities)
     data, widget_action = _split_widget_action(raw)
@@ -115,7 +130,7 @@ async def chat(req: ChatRequest):
     if not message:
         return {"reply": "Could you type or say something first?"}
 
-    store = _get_store(req.shop)
+    store = _get_store_safe(req.shop)
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
 
@@ -167,7 +182,7 @@ async def chat(req: ChatRequest):
 
 @router.post("/confirm")
 async def confirm(req: ConfirmRequest):
-    store = _get_store(req.shop)
+    store = _get_store_safe(req.shop)
     if not store:
         return {"reply": "Sorry, I couldn't verify this store."}
 
@@ -184,10 +199,14 @@ async def confirm(req: ConfirmRequest):
 
 @router.get("/widget-config")
 async def widget_config(shop: str):
-    store = repo.get_store(shop)
-    if not store:
-        return {"error": "unknown store"}
-    cfg = repo.ensure_customization(store["$id"])
+    try:
+        store = repo.get_store(shop)
+        if not store:
+            return {"error": "unknown store"}
+        cfg = repo.ensure_customization(store["$id"])
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: widget_config failed for shop={shop!r}: {e}")
+        return {"error": "temporarily unavailable"}
     return {
         "agent_name": cfg.get("agent_name", "AI Assistant"),
         "agent_title": cfg.get("agent_title", "How can I help you today?"),
