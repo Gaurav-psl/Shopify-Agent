@@ -468,7 +468,7 @@ def login_page():
                 if not user or not bcrypt.checkpw(password.value.encode(), user["password_hash"].encode()):
                     error_label.text = "Invalid email or password."
                     return
-                store_id = user["store"]["$id"] if isinstance(user["store"], dict) else user["store"]
+                store_id = user["store_id"]
                 app.storage.user["store_id"] = store_id
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
