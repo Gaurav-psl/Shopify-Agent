@@ -23,6 +23,32 @@ import dashboard_nicegui  # noqa: F401 — importing this registers all @ui.page
 import chatbot_widget  # NOTE: still needs migrating off SQLAlchemy — see below
 
 app = FastAPI(title="Shopify Chatbot Plugin")
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="Shopify Chatbot Plugin")
+
+# CORS — must come before/alongside your other middleware. The widget
+# is embedded on arbitrary Shopify storefront domains (a different
+# origin than this backend), so the browser requires this to allow the
+# cross-origin POST /chat, /confirm, and GET /widget.js, /widget-config
+# calls it makes. allow_credentials=False is correct here since these
+# widget endpoints don't use cookies (shop is passed explicitly in the
+# request body/query) — only your dashboard needs cookies, and that's
+# loaded same-origin inside Shopify's iframe, so it's unaffected by this.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("SESSION_SECRET", "change-me-in-production"),
+    same_site="lax",
+    https_only=True,
+)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("SESSION_SECRET", "change-me-in-production"),
