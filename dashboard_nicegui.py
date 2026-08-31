@@ -22,6 +22,9 @@ import httpx
 from nicegui import ui, app
 
 import repository_appwrite as repo
+import email_utils
+
+APP_URL = (os.environ.get("APP_URL") or os.environ.get("HOST") or "http://localhost:8080").strip().rstrip("/")
 
 BRAND = "#4B5563"
 BRAND_SOFT = "#F3F4F6"
@@ -154,6 +157,7 @@ def _shopify_nav_menu():
 # a small note so the widget itself is still previewable.
 # --------------------------------------------------------------------
 import re  # noqa: E402
+from fastapi import Request  # noqa: E402
 from fastapi.responses import HTMLResponse as _HTMLResponse  # noqa: E402
 
 _CSP_META_RE = re.compile(
@@ -162,7 +166,7 @@ _CSP_META_RE = re.compile(
 )
 
 
-def _blank_preview_html(shop: str, note: str = "") -> str:
+def _blank_preview_html(shop: str, widget_src: str, note: str = "") -> str:
     banner = (
         f'<div style="position:fixed;top:0;left:0;right:0;padding:8px 14px;'
         f'background:#FEF3C7;color:#92400E;font:12px -apple-system,sans-serif;'
@@ -173,14 +177,30 @@ def _blank_preview_html(shop: str, note: str = "") -> str:
 <html><head><meta charset="utf-8"></head>
 <body style="margin:0;min-height:100vh;background:#fafafa;">
   {banner}
-  <script src="/widget.js" data-shop="{shop}" defer></script>
+  <script src="{widget_src}" data-shop="{shop}" defer></script>
 </body></html>"""
 
 
 @app.get("/dashboard/widget-preview")
-async def widget_preview(shop: str):
+async def widget_preview(shop: str, request: Request):
     home_url = f"https://{shop}/"
-    widget_tag = f'<script src="/widget.js" data-shop="{shop}" defer></script>'
+
+    # CRITICAL: this must be an ABSOLUTE URL pointing at OUR OWN server,
+    # never a root-relative path like "/widget.js". The real homepage
+    # HTML below gets a <base href="https://{shop}/"> injected so the
+    # STORE'S OWN relative asset URLs still resolve correctly — but that
+    # base tag affects EVERY relative URL on the page, including
+    # root-relative ones. A root-relative "/widget.js" would silently
+    # resolve to "https://{shop}/widget.js" (a route that doesn't exist
+    # on the merchant's own server) instead of our backend, so the
+    # widget script would never actually load — which is exactly the
+    # bug this fixes. Confirmed empirically: a page with
+    # <base href="https://example.com/"> and <script src="/widget.js">
+    # causes the browser to request https://example.com/widget.js, not
+    # the server that actually served the page.
+    own_origin = f"{request.url.scheme}://{request.url.netloc}"
+    widget_src = f"{own_origin}/widget.js"
+    widget_tag = f'<script src="{widget_src}" data-shop="{shop}" defer></script>'
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
@@ -219,6 +239,7 @@ async def widget_preview(shop: str):
         return _HTMLResponse(
             _blank_preview_html(
                 shop,
+                widget_src,
                 note="Couldn't load your storefront homepage for this preview — showing the widget on a blank canvas instead.",
             )
         )
@@ -418,50 +439,12 @@ def _auth_shell():
 
 @ui.page("/dashboard/signup")
 def signup_page(shop: str = ""):
-    with _auth_shell():
-        with ui.column().classes("items-center gap-2 mb-2"):
-            with ui.element("div").classes("w-10 h-10 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
-                ui.icon("forum", size="20px").style("color:white;")
-            ui.label("RenderLink").classes("text-xl font-bold text-gray-900")
-
-        with ui.card().classes("p-7 w-full max-w-sm gap-1"):
-            ui.label("Set up your dashboard").classes("text-lg font-bold text-gray-900")
-            ui.label("Create your login to manage your store's AI assistant.").classes("text-sm text-gray-500 mb-3")
-
-            store_domain = ui.input("Store domain", value=shop, placeholder="myshop.myshopify.com").classes("w-full")
-            email = ui.input("Email", placeholder="you@myshop.com").classes("w-full")
-            password = ui.input("Password", password=True, password_toggle_button=True, placeholder="At least 8 characters").classes("w-full")
-            error_label = ui.label("").classes("text-xs text-gray-500")
-
-            def submit():
-                if not store_domain.value.strip() or not email.value.strip() or len(password.value) < 8:
-                    error_label.text = "Fill in every field — password needs at least 8 characters."
-                    return
-                store = repo.get_store(store_domain.value.strip())
-                if not store:
-                    error_label.text = "Store not found — please reinstall the app."
-                    return
-                if repo.has_dashboard_user(store["$id"]):
-                    error_label.text = "This store already has a dashboard login — try logging in instead."
-                    return
-                if repo.get_dashboard_user_by_email(email.value.strip()):
-                    error_label.text = "That email is already in use."
-                    return
-                user = repo.create_dashboard_user(
-                    store["$id"], email.value.strip(),
-                    bcrypt.hashpw(password.value.encode(), bcrypt.gensalt()).decode(),
-                )
-                app.storage.user["store_id"] = store["$id"]
-                app.storage.user["user_id"] = user["$id"]
-                app.storage.user["email"] = user["email"]
-                _goto("/dashboard/dashboard")
-
-            ui.button("Create account", on_click=submit).props("no-caps icon-right=arrow_forward").classes(
-                "w-full mt-3"
-            ).style(f"background:{BRAND};color:white;border-radius:10px;")
-            with ui.row().classes("w-full justify-center mt-2"):
-                ui.label("Already have an account?").classes("text-xs text-gray-500")
-                ui.link("Log in", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
+    # Signup is no longer a standalone page — it's step 1 of the setup
+    # wizard, which only ever runs once, the first time a store uses
+    # the app. Kept as a route (rather than deleted) purely so
+    # shopify_auth.py's existing OAuth redirect for new installs
+    # doesn't need to change.
+    _goto(f"/dashboard/setup?shop={shop}")
 
 
 @ui.page("/dashboard/login")
@@ -489,19 +472,275 @@ def login_page():
                 app.storage.user["store_id"] = store_id
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
-                _goto("/dashboard/Dashboard")
+
+                # First-time (or never-finished) setup gets routed back
+                # into the wizard instead of straight to the dashboard.
+                store = repo.get_store_by_id(store_id)
+                if store and not repo.is_setup_complete(store):
+                    _goto("/dashboard/setup")
+                else:
+                    _goto("/dashboard/Dashboard")
 
             ui.button("Log in", on_click=submit).props("no-caps").classes("w-full mt-3").style(
                 f"background:{BRAND};color:white;border-radius:10px;"
             )
+            with ui.row().classes("w-full justify-center mt-1"):
+                ui.link("Forgot password?", "/dashboard/forgot-password").classes("text-xs text-gray-500")
             with ui.row().classes("w-full justify-center mt-2"):
                 ui.label("New here?").classes("text-xs text-gray-500")
                 ui.link("Create an account", "/dashboard/signup").classes("text-xs font-semibold text-gray-800")
 
 
+@ui.page("/dashboard/forgot-password")
+def forgot_password_page():
+    with _auth_shell():
+        with ui.column().classes("items-center gap-2 mb-2"):
+            with ui.element("div").classes("w-10 h-10 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
+                ui.icon("forum", size="20px").style("color:white;")
+            ui.label("RenderLink").classes("text-xl font-bold text-gray-900")
+
+        card = ui.card().classes("p-7 w-full max-w-sm gap-1")
+
+        def render_form():
+            card.clear()
+            with card:
+                ui.label("Reset your password").classes("text-lg font-bold text-gray-900")
+                ui.label("Enter your email and we'll send you a reset link.").classes("text-sm text-gray-500 mb-3")
+
+                email = ui.input("Email").classes("w-full")
+
+                def submit():
+                    token = repo.create_password_reset_token(email.value.strip())
+                    if token:
+                        reset_link = f"{APP_URL}/dashboard/reset-password?token={token}"
+                        email_utils.send_password_reset_email(email.value.strip(), reset_link)
+                    # Same message either way — never reveal whether an
+                    # email is actually registered.
+                    card.clear()
+                    with card:
+                        ui.icon("mark_email_read", size="32px").style(f"color:{BRAND};")
+                        ui.label("Check your email").classes("text-lg font-bold text-gray-900 mt-1")
+                        ui.label(
+                            "If that email is registered, a password reset link is on its way. "
+                            "It expires in 1 hour."
+                        ).classes("text-sm text-gray-500")
+                        ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800 mt-3")
+
+                ui.button("Send reset link", on_click=submit).props("no-caps").classes("w-full mt-3").style(
+                    f"background:{BRAND};color:white;border-radius:10px;"
+                )
+                with ui.row().classes("w-full justify-center mt-2"):
+                    ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
+
+        render_form()
+
+
+@ui.page("/dashboard/reset-password")
+def reset_password_page(token: str = ""):
+    with _auth_shell():
+        with ui.column().classes("items-center gap-2 mb-2"):
+            with ui.element("div").classes("w-10 h-10 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
+                ui.icon("forum", size="20px").style("color:white;")
+            ui.label("RenderLink").classes("text-xl font-bold text-gray-900")
+
+        with ui.card().classes("p-7 w-full max-w-sm gap-1") as card:
+            user = repo.get_dashboard_user_by_reset_token(token) if token else None
+
+            if not user:
+                ui.icon("error_outline", size="32px").style("color:#DC2626;")
+                ui.label("This reset link is invalid or has expired.").classes("text-sm text-gray-700 mt-1")
+                ui.link("Request a new link", "/dashboard/forgot-password").classes("text-xs font-semibold text-gray-800 mt-3")
+            else:
+                ui.label("Choose a new password").classes("text-lg font-bold text-gray-900")
+                ui.label(f"Resetting password for {user['email']}").classes("text-sm text-gray-500 mb-3")
+
+                new_password = ui.input("New password", password=True, password_toggle_button=True, placeholder="At least 8 characters").classes("w-full")
+                confirm_password = ui.input("Confirm password", password=True, password_toggle_button=True).classes("w-full")
+                error_label = ui.label("").classes("text-xs text-gray-500")
+
+                def submit():
+                    if len(new_password.value) < 8:
+                        error_label.text = "Password needs at least 8 characters."
+                        return
+                    if new_password.value != confirm_password.value:
+                        error_label.text = "Passwords don't match."
+                        return
+                    repo.reset_password(user["$id"], bcrypt.hashpw(new_password.value.encode(), bcrypt.gensalt()).decode())
+                    ui.notify("Password updated — please log in.", type="positive")
+                    _goto("/dashboard/login")
+
+                ui.button("Update password", on_click=submit).props("no-caps").classes("w-full mt-3").style(
+                    f"background:{BRAND};color:white;border-radius:10px;"
+                )
+
+
 @ui.page("/dashboard")
 def dashboard_root():
     _goto("/dashboard/Dashboard")
+
+
+# --------------------------------------------------------------------
+# SETUP WIZARD — one-time onboarding, replaces the old standalone
+# signup page. Step 1 creates the account (was signup), step 2 picks
+# features, step 3 optionally customizes the agent (defaults are kept
+# if skipped, since ensure_features()/ensure_customization() already
+# seed sensible values), step 4 confirms and flags the browser
+# third-party-cookie requirement before handing off to the dashboard.
+# --------------------------------------------------------------------
+@ui.page("/dashboard/setup")
+def setup_page(shop: str = ""):
+    ui.query("body").style(f"background:{PAGE_BG};")
+
+    # If already logged in (e.g. resuming setup after a login redirect
+    # for a store that started but never finished), skip account
+    # creation — that part's already done.
+    existing_store_id = app.storage.user.get("store_id")
+    start_step = "features" if existing_store_id else "account"
+
+    def current_wizard_store() -> dict | None:
+        sid = app.storage.user.get("store_id")
+        return repo.get_store_by_id(sid) if sid else None
+
+    with ui.column().classes("w-full items-center").style("min-height:100vh;padding:40px 16px;"):
+        with ui.column().classes("items-center gap-2 mb-4"):
+            with ui.element("div").classes("w-10 h-10 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
+                ui.icon("forum", size="20px").style("color:white;")
+            ui.label("Welcome to RenderLink").classes("text-xl font-bold text-gray-900")
+            ui.label("Let's get your AI assistant set up — takes about a minute.").classes("text-sm text-gray-500")
+
+        with ui.card().classes("p-0 w-full max-w-xl gap-0 overflow-hidden"):
+            with ui.stepper(value=start_step).props("flat").classes("w-full") as stepper:
+
+                # ---- Step 1: Account details ----
+                with ui.step("account", "Account details", icon="person"):
+                    ui.label("Create your dashboard login").classes("font-bold text-gray-900")
+                    ui.label("Separate from your Shopify login — just for this dashboard.").classes("text-xs text-gray-500 mb-2")
+
+                    store_domain = ui.input("Store domain", value=shop, placeholder="myshop.myshopify.com").classes("w-full")
+                    email = ui.input("Email", placeholder="you@myshop.com").classes("w-full")
+                    password = ui.input("Password", password=True, password_toggle_button=True, placeholder="At least 8 characters").classes("w-full")
+                    account_error = ui.label("").classes("text-xs text-red-500")
+
+                    def create_account():
+                        if not store_domain.value.strip() or not email.value.strip() or len(password.value) < 8:
+                            account_error.text = "Fill in every field — password needs at least 8 characters."
+                            return
+                        store = repo.get_store(store_domain.value.strip())
+                        if not store:
+                            account_error.text = "Store not found — please reinstall the app."
+                            return
+                        if repo.has_dashboard_user(store["$id"]):
+                            account_error.text = "This store already has a dashboard login — log in instead."
+                            return
+                        if repo.get_dashboard_user_by_email(email.value.strip()):
+                            account_error.text = "That email is already in use."
+                            return
+                        user = repo.create_dashboard_user(
+                            store["$id"], email.value.strip(),
+                            bcrypt.hashpw(password.value.encode(), bcrypt.gensalt()).decode(),
+                        )
+                        app.storage.user["store_id"] = store["$id"]
+                        app.storage.user["user_id"] = user["$id"]
+                        app.storage.user["email"] = user["email"]
+                        stepper.next()
+
+                    with ui.stepper_navigation():
+                        ui.button("Continue", on_click=create_account).props("no-caps icon-right=arrow_forward").style(
+                            f"background:{BRAND};color:white;border-radius:10px;"
+                        )
+
+                # ---- Step 2: Features ----
+                with ui.step("features", "Features", icon="grid_view"):
+                    ui.label("Choose what your assistant can help with").classes("font-bold text-gray-900")
+                    ui.label("You can change these anytime from Features in the dashboard.").classes("text-xs text-gray-500 mb-2")
+
+                    _wizard_store = current_wizard_store()
+                    features_state = dict(repo.ensure_features(_wizard_store["$id"])) if _wizard_store else {}
+
+                    for key, label, icon in FEATURE_LIST:
+                        with ui.row().classes("w-full items-center justify-between px-4 py-2.5 rounded-xl").style(f"background:{BRAND_SOFT};"):
+                            with ui.row().classes("items-center gap-2"):
+                                ui.icon(icon, size="15px").style("color:#4B5563;")
+                                ui.label(label).classes("text-sm font-medium text-gray-700")
+
+                            def on_toggle(e, k=key):
+                                features_state[k] = e.value
+
+                            ui.switch(value=bool(features_state.get(key)), on_change=on_toggle).props("color=grey-8")
+
+                    def save_features_and_continue():
+                        store_now = current_wizard_store()
+                        if store_now:
+                            repo.update_features(store_now["$id"], **features_state)
+                        stepper.next()
+
+                    with ui.stepper_navigation():
+                        ui.button("Continue", on_click=save_features_and_continue).props("no-caps icon-right=arrow_forward").style(
+                            f"background:{BRAND};color:white;border-radius:10px;"
+                        )
+                        ui.button("Back", on_click=stepper.previous).props("no-caps flat").style("color:#6B7280;")
+
+                # ---- Step 3: AI Agent customization (optional) ----
+                with ui.step("agent", "AI Agent", icon="smart_toy"):
+                    ui.label("Customize your assistant").classes("font-bold text-gray-900")
+                    ui.label("Optional — skip this and we'll use these defaults as-is.").classes("text-xs text-gray-500 mb-2")
+
+                    _wizard_store2 = current_wizard_store()
+                    cfg_defaults = repo.ensure_customization(_wizard_store2["$id"]) if _wizard_store2 else {}
+
+                    name = ui.input("Agent name", value=cfg_defaults.get("agent_name", "AI Assistant")).classes("w-full")
+                    welcome = ui.input("Welcome message", value=cfg_defaults.get("agent_title", "How can I help you today?")).classes("w-full")
+                    instructions = ui.textarea("Agent instructions (optional)", value=cfg_defaults.get("instructions", "")).classes("w-full").props("rows=3")
+
+                    def save_agent_and_continue():
+                        store_now = current_wizard_store()
+                        if store_now:
+                            # Whatever's in these fields gets saved — if the
+                            # user never touched them, that's just the same
+                            # defaults being re-saved unchanged, so "skipping"
+                            # this step naturally keeps the defaults.
+                            repo.update_customization(
+                                store_now["$id"],
+                                agent_name=name.value.strip() or "AI Assistant",
+                                agent_title=welcome.value.strip() or "How can I help you today?",
+                                instructions=instructions.value.strip(),
+                            )
+                        stepper.next()
+
+                    with ui.stepper_navigation():
+                        ui.button("Continue", on_click=save_agent_and_continue).props("no-caps icon-right=arrow_forward").style(
+                            f"background:{BRAND};color:white;border-radius:10px;"
+                        )
+                        ui.button("Back", on_click=stepper.previous).props("no-caps flat").style("color:#6B7280;")
+
+                # ---- Step 4: Finish + third-party cookies notice ----
+                with ui.step("finish", "Finish", icon="check_circle"):
+                    ui.icon("celebration", size="32px").style(f"color:{BRAND};")
+                    ui.label("You're all set!").classes("font-bold text-gray-900 text-lg mt-1")
+                    ui.label("Your AI assistant is ready. One last thing before you go:").classes("text-sm text-gray-600 mb-2")
+
+                    with ui.column().classes("w-full p-4 rounded-xl gap-1").style("background:#FEF3C7;"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon("cookie", size="16px").style("color:#92400E;")
+                            ui.label("Please allow third-party cookies").classes("text-sm font-semibold text-gray-900")
+                        ui.label(
+                            "The live preview loads your store's own domain inside this dashboard. "
+                            "If your browser blocks third-party cookies, you may see errors there. To avoid this:"
+                        ).classes("text-xs text-gray-700")
+                        ui.label('• Chrome: Settings → Privacy and security → Third-party cookies → Allow').classes("text-xs text-gray-600")
+                        ui.label('• Safari: Settings → Privacy → uncheck "Prevent cross-site tracking"').classes("text-xs text-gray-600")
+                        ui.label('• Firefox: Settings → Privacy & Security → Enhanced Tracking Protection → Standard').classes("text-xs text-gray-600")
+
+                    def finish_setup():
+                        store_now = current_wizard_store()
+                        if store_now:
+                            repo.mark_setup_complete(store_now["$id"])
+                        _goto("/dashboard/Dashboard")
+
+                    with ui.stepper_navigation():
+                        ui.button("Go to Dashboard", on_click=finish_setup).props("no-caps icon-right=arrow_forward").classes("w-full").style(
+                            f"background:{BRAND};color:white;border-radius:10px;"
+                        )
 
 
 # --------------------------------------------------------------------
