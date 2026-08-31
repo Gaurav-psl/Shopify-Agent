@@ -473,13 +473,12 @@ def login_page():
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]
 
-                # First-time (or never-finished) setup gets routed back
-                # into the wizard instead of straight to the dashboard.
-                store = repo.get_store_by_id(store_id)
-                if store and not repo.is_setup_complete(store):
-                    _goto("/dashboard/setup")
-                else:
-                    _goto("/dashboard/Dashboard")
+                # Login always goes straight to the dashboard — setup is
+                # only ever shown to someone creating a new account
+                # (via signup -> /dashboard/setup). A returning user who
+                # logs in never sees it, even if an earlier setup
+                # attempt was abandoned partway through.
+                _goto("/dashboard/Dashboard")
 
             ui.button("Log in", on_click=submit).props("no-caps").classes("w-full mt-3").style(
                 f"background:{BRAND};color:white;border-radius:10px;"
