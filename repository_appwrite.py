@@ -342,3 +342,83 @@ def submit_feedback(store_id: str, message: str) -> dict:
         DATABASE_ID, FEEDBACK_COLLECTION, ID.unique(),
         data={"store": store_id, "message": message},
     )
+"""
+ADDITIONS FOR repository_appwrite.py
+-------------------------------------
+Append these functions to your existing repository_appwrite.py — they
+assume the same `databases`, `DATABASE_ID`, `STORES_COLLECTION`,
+`DASHBOARD_USERS_COLLECTION`, and `Query`/`ID` imports your file
+already has.
+
+REQUIRED NEW APPWRITE ATTRIBUTES (add these in the Appwrite console,
+or via setup_collections.py if you're re-running it):
+
+  On the `stores` collection:
+    - setup_completed   (boolean, default: false)
+
+  On the `dashboard_users` collection:
+    - reset_token           (string, size 255, not required)
+    - reset_token_expires   (string, size 64, not required)  -- stored
+                              as an ISO datetime string
+"""
+
+import secrets
+from datetime import datetime, timedelta, timezone
+
+
+def is_setup_complete(store: dict) -> bool:
+    return bool(store.get("setup_completed"))
+
+
+def mark_setup_complete(store_id: str) -> dict:
+    return databases.update_document(
+        DATABASE_ID, STORES_COLLECTION, store_id, data={"setup_completed": True}
+    )
+
+
+def create_password_reset_token(email: str) -> str | None:
+    """Returns a fresh reset token if the email matches a real dashboard
+    user, or None if it doesn't. Callers should show the SAME message
+    either way ("if that email exists, we sent a link") — never reveal
+    whether an email is registered, that's a real security leak."""
+    user = get_dashboard_user_by_email(email)
+    if not user:
+        return None
+    token = secrets.token_urlsafe(32)
+    expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    databases.update_document(
+        DATABASE_ID, DASHBOARD_USERS_COLLECTION, user["$id"],
+        data={"reset_token": token, "reset_token_expires": expires},
+    )
+    return token
+
+
+def get_dashboard_user_by_reset_token(token: str) -> dict | None:
+    """Returns the user if the token is valid AND not expired. A token
+    older than 1 hour is treated as if it doesn't exist at all."""
+    result = databases.list_documents(
+        DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+        queries=[Query.equal("reset_token", token)],
+    )
+    docs = result["documents"]
+    if not docs:
+        return None
+    user = docs[0]
+    expires = user.get("reset_token_expires")
+    if not expires:
+        return None
+    try:
+        if datetime.fromisoformat(expires) < datetime.now(timezone.utc):
+            return None  # expired
+    except ValueError:
+        return None
+    return user
+
+
+def reset_password(user_id: str, new_password_hash: str) -> None:
+    """Sets the new password AND invalidates the reset token — a token
+    must only ever be usable once."""
+    databases.update_document(
+        DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id,
+        data={"password_hash": new_password_hash, "reset_token": None, "reset_token_expires": None},
+    )
