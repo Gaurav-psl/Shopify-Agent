@@ -28,7 +28,8 @@ def _get_client():
     called — it can never take down OAuth or any other route on startup."""
     global _client
     if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"),
+                        base_url=os.environ.get("OPENAI_BASE_URL") or None,)
     return _client
 
 
