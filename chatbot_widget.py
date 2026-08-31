@@ -29,12 +29,11 @@ widget.js performs the real fetch() against the store's own
 """
 
 import time
+from types import SimpleNamespace
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
-from database import SessionLocal
-from models import Store, AgentCustomization
+import repository_appwrite as repo
 from intent_classifier import classify_intent, load_schema
 from reply_generator import generate_reply
 import shopify_actions
@@ -88,15 +87,19 @@ class ConfirmRequest(BaseModel):
     confirmed: bool
 
 
-def _get_store(shop: str) -> Store | None:
-    db: Session = SessionLocal()
-    try:
-        return db.query(Store).filter_by(shop_domain=shop, uninstalled=False).first()
-    finally:
-        db.close()
+def _get_store(shop: str) -> SimpleNamespace | None:
+    """Returns a lightweight object with .shop_domain and .access_token
+    attributes — shopify_actions.py was written expecting attribute
+    access (store.access_token), and Appwrite documents are plain dicts
+    (store["access_token"]), so this wrapper bridges the two without
+    needing to touch a single line of shopify_actions.py."""
+    doc = repo.get_store(shop)
+    if not doc:
+        return None
+    return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
 
 
-async def _execute_and_reply(store: Store, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
+async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities)
     data, widget_action = _split_widget_action(raw)
     reply = generate_reply(action, data, language, original_message)
@@ -181,29 +184,17 @@ async def confirm(req: ConfirmRequest):
 
 @router.get("/widget-config")
 async def widget_config(shop: str):
-    db: Session = SessionLocal()
-    try:
-        store = db.query(Store).filter_by(shop_domain=shop, uninstalled=False).first()
-        if not store:
-            return {"error": "unknown store"}
-        cfg = db.query(AgentCustomization).filter_by(store_id=store.id).first()
-        if not cfg:
-            return {
-                "agent_name": "AI Assistant",
-                "agent_title": "How can I help you today?",
-                "icon_type": "preset",
-                "theme_color": "#2b2b2b",
-                "custom_icon_url": "",
-            }
-        return {
-            "agent_name": cfg.agent_name,
-            "agent_title": cfg.agent_title,
-            "icon_type": cfg.icon_type,
-            "theme_color": cfg.theme_color,
-            "custom_icon_url": cfg.custom_icon_url,
-        }
-    finally:
-        db.close()
+    store = repo.get_store(shop)
+    if not store:
+        return {"error": "unknown store"}
+    cfg = repo.ensure_customization(store["$id"])
+    return {
+        "agent_name": cfg.get("agent_name", "AI Assistant"),
+        "agent_title": cfg.get("agent_title", "How can I help you today?"),
+        "icon_type": cfg.get("icon_type", "preset"),
+        "theme_color": cfg.get("theme_color", "#2b2b2b"),
+        "custom_icon_url": cfg.get("custom_icon_url", ""),
+    }
 
 
 @router.get("/widget.js")
