@@ -7,9 +7,13 @@ AgentCustomizations, DashboardUsers — those are assumed to already
 exist and are not touched by this script).
 
 This script only:
-  1. Adds `instructions`, `status`, `widget_position` attributes to
+  1. Adds `setup_completed` to your existing Stores collection, and
+     `reset_token` / `reset_token_expires` to your existing
+     DashboardUsers collection (needed for the login/setup-wizard and
+     forgot-password flows in dashboard_nicegui.py).
+  2. Adds `instructions`, `status`, `widget_position` attributes to
      your existing AgentCustomizations collection.
-  2. Creates 4 new collections — Features, StoreInfo, FAQs, Feedback —
+  3. Creates 4 new collections — Features, StoreInfo, FAQs, Feedback —
      each with a relationship back to Stores.
 
 Safe to re-run: every create_* call is wrapped so a 409 "already
@@ -41,6 +45,7 @@ import time
 from appwrite_client import (
     databases, DATABASE_ID, STORES_COLLECTION, CUSTOMIZATIONS_COLLECTION,
     FEATURES_COLLECTION, STORE_INFO_COLLECTION, FAQS_COLLECTION, FEEDBACK_COLLECTION,
+    DASHBOARD_USERS_COLLECTION,
 )
 from appwrite.exception import AppwriteException
 from appwrite.enums.relationship_type import RelationshipType
@@ -82,6 +87,28 @@ def _run(step_description, fn, *args, **kwargs):
 
 
 def setup():
+    # ---- New attribute on the existing Stores collection ----
+    _run(
+        "  attribute 'stores.setup_completed'...",
+        databases.create_boolean_attribute, DATABASE_ID, STORES_COLLECTION,
+        "setup_completed", required=False, default=False,
+    )
+
+    # ---- New attributes on the existing DashboardUsers collection ----
+    # (password reset flow — reset_token is looked up directly, so it
+    # isn't marked as an Appwrite "required" field: a user who's never
+    # requested a reset simply has it unset/None.)
+    _run(
+        "  attribute 'dashboard_users.reset_token'...",
+        databases.create_string_attribute, DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+        "reset_token", size=255, required=False,
+    )
+    _run(
+        "  attribute 'dashboard_users.reset_token_expires'...",
+        databases.create_string_attribute, DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+        "reset_token_expires", size=64, required=False,
+    )
+
     # ---- New attributes on the existing AgentCustomizations collection ----
     _run(
         "  attribute 'agent_customizations.instructions'...",
