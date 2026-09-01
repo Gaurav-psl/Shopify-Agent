@@ -99,21 +99,6 @@ def _get_store(shop: str) -> SimpleNamespace | None:
     return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
 
 
-def _get_store_safe(shop: str) -> SimpleNamespace | None:
-    """Same as _get_store, but never lets an Appwrite-level failure
-    (bad database/collection id, permissions, network hiccup, ...)
-    escape as a raw 500. Every caller in this file uses this instead of
-    _get_store directly — a failure here used to crash the whole
-    request before either /chat's or /confirm's own try/except blocks
-    got a chance to run, which is what turned a real backend error into
-    the widget's generic "could not reach the server" message."""
-    try:
-        return _get_store(shop)
-    except Exception as e:  # noqa: BLE001
-        print(f"chatbot_widget: _get_store failed for shop={shop!r}: {e}")
-        return None
-
-
 async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities)
     data, widget_action = _split_widget_action(raw)
@@ -130,7 +115,7 @@ async def chat(req: ChatRequest):
     if not message:
         return {"reply": "Could you type or say something first?"}
 
-    store = _get_store_safe(req.shop)
+    store = _get_store(req.shop)
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
 
@@ -182,7 +167,7 @@ async def chat(req: ChatRequest):
 
 @router.post("/confirm")
 async def confirm(req: ConfirmRequest):
-    store = _get_store_safe(req.shop)
+    store = _get_store(req.shop)
     if not store:
         return {"reply": "Sorry, I couldn't verify this store."}
 
@@ -199,14 +184,10 @@ async def confirm(req: ConfirmRequest):
 
 @router.get("/widget-config")
 async def widget_config(shop: str):
-    try:
-        store = repo.get_store(shop)
-        if not store:
-            return {"error": "unknown store"}
-        cfg = repo.ensure_customization(store["$id"])
-    except Exception as e:  # noqa: BLE001
-        print(f"chatbot_widget: widget_config failed for shop={shop!r}: {e}")
-        return {"error": "temporarily unavailable"}
+    store = repo.get_store(shop)
+    if not store:
+        return {"error": "unknown store"}
+    cfg = repo.ensure_customization(store["$id"])
     return {
         "agent_name": cfg.get("agent_name", "AI Assistant"),
         "agent_title": cfg.get("agent_title", "How can I help you today?"),
@@ -270,8 +251,9 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .bubble.bot { background:rgba(255,255,255,.75); border:1px solid rgba(236,236,236,.8); color:#2a2a2a; box-shadow:0 2px 8px rgba(0,0,0,.05); align-self:flex-start; }",
     "#ai-chat-widget-root .bubble.user { background:#2b2b2b; color:#fff; align-self:flex-end; }",
     "#ai-chat-widget-root .bubble.typing { color:#999; font-style:italic; }",
+    "#ai-chat-widget-root #greetingBubble { font-size:14px; font-weight:600; line-height:1.5; }",
     "#ai-chat-widget-root .quick-actions { display:flex; flex-direction:column; gap:6px; align-self:flex-start; max-width:92%; }",
-    "#ai-chat-widget-root .quick-action-btn { border:1px solid #e2e2e2; background:#fafafa; color:#2b2b2b; font-size:10.5px; font-weight:600; padding:8px 12px; border-radius:999px; text-align:left; cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .28s ease, transform .28s ease, background .15s ease; }",
+    "#ai-chat-widget-root .quick-action-btn { border:1px solid #e2e2e2; background:#fafafa; color:#2b2b2b; font-size:10.5px; font-weight:600; padding:5px 8px; border-radius:999px; text-align:left; cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .28s ease, transform .28s ease, background .15s ease; }",
     "#ai-chat-widget-root .quick-action-btn.show { opacity:1; transform:translateY(0); }",
     "#ai-chat-widget-root .quick-action-btn:hover { background:#f0f0f0; }",
     "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; align-self:flex-start; max-width:100%; }",
@@ -279,14 +261,17 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .product-card img { width:100%; height:70px; object-fit:cover; border-radius:6px; background:#f2f2f2; }",
     "#ai-chat-widget-root .product-card .p-name { font-size:10px; font-weight:600; color:#222; max-height:26px; overflow:hidden; }",
     "#ai-chat-widget-root .product-card .p-price { font-size:10.5px; font-weight:700; color:#2b2b2b; }",
-    "#ai-chat-widget-root .product-card button { margin-top:2px; border:none; background:#2b2b2b; color:#fff; font-size:9.5px; padding:5px 0; border-radius:999px; cursor:pointer; }",
+    "#ai-chat-widget-root .product-card button { margin-top:2px; border:none; background:#2b2b2b; color:#fff; font-size:9.5px; padding:3px 0; border-radius:999px; cursor:pointer; }",
     "#ai-chat-widget-root .product-card button:disabled { background:#9c9c9c; }",
     "#ai-chat-widget-root .input-row { position:relative; }",
-    "#ai-chat-widget-root .input-row input { width:100%; padding:10px 40px 10px 12px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:10.5px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
-    "#ai-chat-widget-root .mic-btn { position:absolute; right:4px; top:50%; transform:translateY(-50%); width:28px; height:28px; border-radius:50%; background:#2b2b2b; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease, box-shadow .08s ease, transform .08s ease; }",
+    "#ai-chat-widget-root .input-row input { width:100%; padding:15px 52px 15px 16px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:13px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
+    "#ai-chat-widget-root .mic-btn { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border-radius:50%; background:#2b2b2b; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease, box-shadow .08s ease, transform .08s ease; }",
     "#ai-chat-widget-root .mic-btn.listening { background:#d64545; }",
     "#ai-chat-widget-root .mic-btn.speaking { box-shadow:0 0 0 calc(4px + var(--level,0)*12px) rgba(214,69,69,calc(.15 + var(--level,0)*.35)), 0 0 calc(6px + var(--level,0)*18px) calc(2px + var(--level,0)*6px) rgba(214,69,69,calc(.4 + var(--level,0)*.5)); transform:translateY(-50%) scale(calc(1 + var(--level,0)*.12)); }",
-    "#ai-chat-widget-root .mic-btn svg { width:12px; height:12px; stroke:#fff; }",
+    "#ai-chat-widget-root .mic-btn svg { width:17px; height:17px; stroke:#fff; }",
+    "#ai-chat-widget-root .mic-btn .icon-send-inner { display:none; }",
+    "#ai-chat-widget-root .mic-btn.has-text .icon-mic-inner { display:none; }",
+    "#ai-chat-widget-root .mic-btn.has-text .icon-send-inner { display:block; }",
     "#ai-chat-widget-root .mic-status { font-size:9.5px; color:#b04040; margin-top:4px; min-height:12px; }"
   ].join("\n");
   document.head.appendChild(style);
@@ -318,7 +303,8 @@ WIDGET_JS = r"""
       '<div class="input-row">' +
         '<input type="text" id="chatInput" placeholder="Search, add to cart, ask a question....." />' +
         '<button class="mic-btn" id="micBtn" aria-label="Voice input">' +
-          '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
+          '<svg class="icon-mic-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
+          '<svg class="icon-send-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' +
         "</button>" +
       "</div>" +
       '<div class="mic-status" id="micStatus"></div>' +
@@ -563,6 +549,7 @@ WIDGET_JS = r"""
     if (!text) return;
     addBubble(text, "user");
     input.value = "";
+    micBtn.classList.remove("has-text");
     var typingEl = addBubble("typing\u2026", "bot typing");
 
     fetch(CFG.chatEndpoint, {
@@ -584,6 +571,9 @@ WIDGET_JS = r"""
       });
   }
   input.addEventListener("keydown", function (e) { if (e.key === "Enter") sendMessage(input.value); });
+  input.addEventListener("input", function () {
+    micBtn.classList.toggle("has-text", input.value.trim().length > 0);
+  });
   refreshCartBadge();
 
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -649,10 +639,12 @@ WIDGET_JS = r"""
       if (input.value.trim()) sendMessage(input.value);
     };
     micBtn.addEventListener("click", function () {
+      if (micBtn.classList.contains("has-text")) { sendMessage(input.value); return; }
       if (listening) { recognition.stop(); } else { input.value = ""; recognition.start(); }
     });
   } else {
     micBtn.addEventListener("click", function () {
+      if (micBtn.classList.contains("has-text")) { sendMessage(input.value); return; }
       micStatus.textContent = "Voice input is not supported in this browser.";
     });
   }
