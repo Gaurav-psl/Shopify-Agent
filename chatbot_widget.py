@@ -266,7 +266,7 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .product-card .p-price { font-size:10.5px; font-weight:700; color:#2b2b2b; }",
     "#ai-chat-widget-root .product-card button { margin-top:2px; border:none; background:#2b2b2b; color:#fff; font-size:9.5px; padding:3px 0; border-radius:999px; cursor:pointer; }",
     "#ai-chat-widget-root .product-card button:disabled { background:#9c9c9c; }",
-    "#ai-chat-widget-root .input-row { position:relative; }",
+    "#ai-chat-widget-root .input-row { position:relative;top:10px; }",
     "#ai-chat-widget-root .input-row input { width:100%; padding:15px 52px 15px 16px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:13px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
     "#ai-chat-widget-root .mic-btn { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border-radius:50%; background:#2b2b2b; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease, box-shadow .08s ease, transform .08s ease; }",
     "#ai-chat-widget-root .mic-btn.listening { background:#d64545; }",
