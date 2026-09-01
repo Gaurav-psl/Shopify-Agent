@@ -13,6 +13,7 @@ Requires:
 
 import os
 import json
+import re
 from pathlib import Path
 from openai import OpenAI
 
@@ -20,6 +21,18 @@ SCHEMA_PATH = Path(__file__).parent / "intent_schema.json"
 MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
 
 _client = None
+
+# Qwen3-family models can emit an internal reasoning block wrapped in
+# <think>...</think> before the actual answer when "thinking mode" is on.
+# Strip it before parsing, so a stray reasoning block never breaks the
+# json.loads() call below.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    if not text:
+        return ""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _get_client():
@@ -94,9 +107,10 @@ def classify_intent(user_message: str, schema: dict | None = None) -> dict:
             {"role": "user", "content": user_message},
         ],
         temperature=0,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
-    raw = response.choices[0].message.content
+    raw = _strip_thinking(response.choices[0].message.content)
     result = json.loads(raw)
 
     # Don't trust the model's own confidence/requires_confirmation blindly —
