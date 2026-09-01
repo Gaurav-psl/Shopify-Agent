@@ -26,7 +26,7 @@ def _get_client():
     global _client
     if _client is None:
         _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"),
-                        base_url=os.environ.get("OPENAI_BASE_URL") or None,)
+                        base_url=os.environ.get("OPENAI_BASE_URL") )
     return _client
 
 LANGUAGE_NAMES = {
