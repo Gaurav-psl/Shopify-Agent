@@ -13,11 +13,23 @@ the human-facing phrasing.
 
 import os
 import json
+import re
 from openai import OpenAI
 
 MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
 
 _client = None
+
+# Qwen3-family models can emit an internal reasoning block wrapped in
+# <think>...</think> before the actual answer when "thinking mode" is on.
+# Strip it out so only the final, user-facing reply ever reaches the widget.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    if not text:
+        return ""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _get_client():
@@ -81,9 +93,10 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
-    return response.choices[0].message.content.strip()
+    return _strip_thinking(response.choices[0].message.content)
 
 
 if __name__ == "__main__":
