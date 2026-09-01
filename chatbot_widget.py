@@ -137,7 +137,10 @@ async def chat(req: ChatRequest):
     try:
         classification = classify_intent(message, SCHEMA)
     except Exception as e:  # noqa: BLE001
-        print(f"chatbot_widget: classify_intent error: {e}")
+        import traceback
+    print(f"chatbot_widget: classify_intent error: {e!r}")
+    print(f"chatbot_widget: underlying cause: {e.__cause__!r}")
+    traceback.print_exc()
         return {"reply": "Sorry, something went wrong understanding that. Could you rephrase?"}
 
     intent = classification["intent"]
