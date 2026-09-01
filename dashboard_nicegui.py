@@ -60,9 +60,9 @@ FEATURE_LIST = [
 ]
 
 STATUS_STYLES = {
-    "active": {"bg": "#E5E7EB", "text": "#111827", "dot": "#4B5563", "label": "Active"},
-    "inactive": {"bg": "#F3F4F6", "text": "#9CA3AF", "dot": "#D1D5DB", "label": "Inactive"},
-    "maintenance": {"bg": "#F3F4F6", "text": "#6B7280", "dot": "#9CA3AF", "label": "Maintenance"},
+    "active": {"bg": "#E5E7EB", "text": "#111827", "dot": "#22C55E", "label": "Active"},
+    "inactive": {"bg": "#F3F4F6", "text": "#9CA3AF", "dot": "#EF4444", "label": "Inactive"},
+    "maintenance": {"bg": "#F3F4F6", "text": "#6B7280", "dot": "#F97316", "label": "Maintenance"},
 }
 
 THEME_SWATCHES = ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937"]
@@ -914,9 +914,14 @@ def agent_page():
                     with status_row:
                         for key, st in STATUS_STYLES.items():
                             selected = status_value["v"] == key
-                            b = ui.button(
-                                st["label"], on_click=lambda k=key: (status_value.update(v=k), render_status_buttons())
-                            ).props("no-caps flat")
+                            with ui.button(
+                                on_click=lambda k=key: (status_value.update(v=k), render_status_buttons())
+                            ).props("no-caps flat") as b:
+                                with ui.row().classes("items-center gap-1.5 no-wrap"):
+                                    ui.element("div").classes("w-2 h-2 rounded-full").style(
+                                        f"background:{st['dot']};flex-shrink:0;"
+                                    )
+                                    ui.label(st["label"])
                             if selected:
                                 b.style(f"background:{st['bg']};color:{st['text']};border-radius:999px;border:1px solid {st['dot']};")
                             else:
@@ -1074,8 +1079,19 @@ def appearance_page():
 
         with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
             ui.label("Custom icon image").classes("text-xs font-semibold text-gray-600")
-            if cfg.get("custom_icon_url"):
-                ui.image(cfg["custom_icon_url"]).classes("w-10 h-10 rounded-full")
+            icon_preview_row = ui.row().classes("items-center gap-3")
+            with icon_preview_row:
+                if cfg.get("custom_icon_url"):
+                    ui.image(cfg["custom_icon_url"]).classes("w-10 h-10 rounded-full")
+
+                    def delete_icon():
+                        repo.update_customization(store["$id"], custom_icon_url="", icon_type="preset")
+                        icon_preview_row.clear()
+                        ui.notify("Icon removed — refresh to see it applied.", type="positive")
+
+                    ui.button("Remove icon", icon="delete", on_click=delete_icon).props(
+                        "no-caps flat dense"
+                    ).style("color:#DC2626;")
 
             def handle_upload(e):
                 import shutil
