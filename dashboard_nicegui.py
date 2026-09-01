@@ -930,30 +930,18 @@ def agent_page():
                 error_label = ui.label("").classes("text-xs text-gray-500 mt-1")
 
                 def save():
-                    new_name = name_input.value.strip() or "AI Assistant"
-                    new_welcome = welcome_input.value.strip() or "How can I help you today?"
-                    new_instructions = instructions_input.value.strip()
+                    new_name = (name_input.value or "").strip() or "AI Assistant"
+                    new_welcome = (welcome_input.value or "").strip() or "How can I help you today?"
+                    new_instructions = (instructions_input.value or "").strip()
                     new_status = status_value["v"]
 
-                    try:
-                        repo.update_customization(
-                            store["$id"],
-                            agent_name=new_name,
-                            agent_title=new_welcome,
-                            instructions=new_instructions,
-                            status=new_status,
-                        )
-                    except Exception as ex:  # noqa: BLE001
-                        # This used to fail completely silently — the most
-                        # likely cause is that the `instructions`/`status`
-                        # attributes were never actually created on the
-                        # AgentCustomizations collection in Appwrite (check
-                        # whether setup_collections.py's run for those three
-                        # attributes printed "already exists, skipped" or
-                        # "FAILED" — if FAILED, rerun it).
-                        print(f"dashboard_nicegui: failed to save agent customization for store={store['$id']}: {ex}")
-                        ui.notify(f"Save failed: {ex}", type="negative")
-                        return
+                    repo.update_customization(
+                        store["$id"],
+                        agent_name=new_name,
+                        agent_title=new_welcome,
+                        instructions=new_instructions,
+                        status=new_status,
+                    )
 
                     # reflect the change immediately, no page reload needed
                     cfg["agent_name"] = new_name
@@ -1068,17 +1056,12 @@ def appearance_page():
             saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
 
             def save():
-                try:
-                    repo.update_customization(
-                        store["$id"],
-                        theme_color=color_value["v"],
-                        widget_position=position_value["v"],
-                        agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
-                    )
-                except Exception as ex:  # noqa: BLE001
-                    print(f"dashboard_nicegui: failed to save appearance for store={store['$id']}: {ex}")
-                    ui.notify(f"Save failed: {ex}", type="negative")
-                    return
+                repo.update_customization(
+                    store["$id"],
+                    theme_color=color_value["v"],
+                    widget_position=position_value["v"],
+                    agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
+                )
                 saved_label.text = "Saved ✓"
 
             with ui.row().classes("items-center gap-2 mt-2"):
@@ -1103,19 +1086,7 @@ def appearance_page():
                 filepath = os.path.join(UPLOAD_DIR, filename)
                 with open(filepath, "wb") as f:
                     shutil.copyfileobj(e.content, f)
-                # MUST be an absolute URL (including domain) — the widget
-                # loads on the merchant's own storefront domain, not this
-                # app's domain, so a relative path like "/static/..."
-                # resolves against the WRONG origin there and 404s
-                # silently, even though it looks correct in this
-                # dashboard's own preview (which IS same-origin).
-                absolute_url = f"{APP_URL}/{filepath}"
-                try:
-                    repo.update_customization(store["$id"], custom_icon_url=absolute_url, icon_type="custom")
-                except Exception as ex:  # noqa: BLE001
-                    print(f"dashboard_nicegui: failed to save custom_icon_url for store={store['$id']}: {ex}")
-                    ui.notify(f"Upload succeeded but saving it failed: {ex}", type="negative")
-                    return
+                repo.update_customization(store["$id"], custom_icon_url=f"/{filepath}", icon_type="custom")
                 ui.notify("Icon uploaded — refresh to see it applied.", type="positive")
 
             ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/*").classes("w-full")
