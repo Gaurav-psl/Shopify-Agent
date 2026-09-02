@@ -41,11 +41,13 @@ import json
 from datetime import datetime, timedelta
 from appwrite.query import Query
 from appwrite.id import ID
+from appwrite.input_file import InputFile
 from appwrite.exception import AppwriteException
 from appwrite_client import (
-    databases, DATABASE_ID, STORES_COLLECTION, FLOWS_COLLECTION,
+    databases, storage, DATABASE_ID, STORES_COLLECTION, FLOWS_COLLECTION,
     REQUEST_LOGS_COLLECTION, CUSTOMIZATIONS_COLLECTION, DASHBOARD_USERS_COLLECTION,
     FEATURES_COLLECTION, STORE_INFO_COLLECTION, FAQS_COLLECTION, FEEDBACK_COLLECTION,
+    APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID, WIDGET_ICONS_BUCKET,
 )
 
 
@@ -347,6 +349,46 @@ def ensure_customization(store_id: str) -> dict:
 def update_customization(store_id: str, **fields) -> dict:
     existing = ensure_customization(store_id)
     return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fields)
+
+
+# --- Widget icon storage (Appwrite Storage bucket) ---------------------
+#
+# Uploaded icons live in Appwrite Storage rather than local disk, since
+# Render's filesystem is ephemeral and wipes anything written there on
+# every restart/redeploy. This gives back a stable, publicly-loadable
+# URL that survives independently of the app server.
+
+def _storage_file_url(file_id: str) -> str:
+    return f"{APPWRITE_ENDPOINT}/storage/buckets/{WIDGET_ICONS_BUCKET}/files/{file_id}/view?project={APPWRITE_PROJECT_ID}"
+
+
+def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
+    """Uploads a custom widget icon to the Appwrite Storage bucket and
+    returns its public view URL, ready to save as custom_icon_url."""
+    file_id = ID.unique()
+    storage.create_file(
+        bucket_id=WIDGET_ICONS_BUCKET,
+        file_id=file_id,
+        file=InputFile.from_bytes(content, filename=filename),
+    )
+    return _storage_file_url(file_id)
+
+
+def delete_icon_file(file_url: str) -> None:
+    """Best-effort delete of a previously uploaded icon, given the URL
+    stored in custom_icon_url. Silently no-ops if the URL doesn't look
+    like one of our Storage file URLs (e.g. a leftover local-disk path
+    from before this bucket existed) or if the file's already gone."""
+    if not file_url or "/storage/buckets/" not in file_url:
+        return
+    try:
+        file_id = file_url.split("/files/")[1].split("/")[0]
+    except IndexError:
+        return
+    try:
+        storage.delete_file(WIDGET_ICONS_BUCKET, file_id)
+    except AppwriteException:
+        pass
 
 
 # --- Features (per-store toggles for what the AI agent can do) ---
