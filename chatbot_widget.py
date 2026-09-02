@@ -99,6 +99,16 @@ def _get_store(shop: str) -> SimpleNamespace | None:
     return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
 
 
+def _log(shop: str, message: str, status: str, intent=None, action=None, entities=None, reply: str = "") -> None:
+    """Best-effort request logging for the dashboard's Insights section.
+    Must never break the actual chat response, so failures here are
+    swallowed (and printed for server logs) rather than raised."""
+    try:
+        repo.log_request(shop, message, status, detected_intent=intent, detected_action=action, reply=reply, entities=entities)
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: log_request failed: {e!r}")
+
+
 async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities)
     data, widget_action = _split_widget_action(raw)
@@ -126,10 +136,13 @@ async def chat(req: ChatRequest):
         text = message.lower().strip(" .!")
         if text in _AFFIRMATIVE:
             PENDING.pop(req.session_id, None)
-            return await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message)
+            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message)
+            _log(req.shop, message, result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
+            return result
         if text in _NEGATIVE:
             PENDING.pop(req.session_id, None)
             cancel_reply = generate_reply("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message)
+            _log(req.shop, message, "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
             return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
         # Anything else: treat as the shopper moving on to a new request.
         PENDING.pop(req.session_id, None)
@@ -141,6 +154,7 @@ async def chat(req: ChatRequest):
         print(f"chatbot_widget: classify_intent error: {e!r}")
         print(f"chatbot_widget: underlying cause: {e.__cause__!r}")
         traceback.print_exc()
+        _log(req.shop, message, "error")
         return {"reply": "Sorry, something went wrong understanding that. Could you rephrase?"}
 
     intent = classification["intent"]
@@ -159,12 +173,16 @@ async def chat(req: ChatRequest):
              "instruction": "Ask the shopper to reply yes to confirm or no to cancel before this action is taken."},
             language, message,
         )
+        _log(req.shop, message, "confirmation_required", intent, action, entities, confirm_reply)
         return {"status": "confirmation_required", "reply": confirm_reply, "language": language}
 
     try:
-        return await _execute_and_reply(store, intent, action, entities, language, message)
+        result = await _execute_and_reply(store, intent, action, entities, language, message)
+        _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
+        return result
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: dispatch error: {e}")
+        _log(req.shop, message, "error", intent, action, entities)
         return {"reply": "Sorry, something went wrong completing that. Please try again."}
 
 
@@ -180,9 +198,12 @@ async def confirm(req: ConfirmRequest):
 
     if not req.confirmed:
         cancel_reply = generate_reply("cancelled", {"message": "The shopper declined."}, pending["language"], "cancel")
+        _log(req.shop, "confirmed=false", "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
         return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
-    return await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed")
+    result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed")
+    _log(req.shop, "confirmed=true", result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
+    return result
 
 
 @router.get("/widget-config")
@@ -237,8 +258,9 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none; }",
     "#ai-chat-widget-root .chat-fab.open .icon-close { display:block; }",
     "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none; }",
-    "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(300px, calc(100vw - 24px)); max-height:calc(100vh - 100px); background:rgba(255,255,255,.72); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); border:1.5px solid rgba(0,0,0,.12); border-radius:16px; padding:14px; box-shadow:0 12px 28px rgba(0,0,0,.14); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease; z-index:2147483000; display:flex; flex-direction:column; }",
+    "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(300px, calc(100vw - 24px)); height:min(440px, calc(100vh - 100px)); max-height:calc(100vh - 100px); background:rgba(255,255,255,.72); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); border:1.5px solid rgba(0,0,0,.12); border-radius:16px; padding:14px; box-shadow:0 12px 28px rgba(0,0,0,.14); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease, width .25s ease, height .25s ease; z-index:2147483000; display:flex; flex-direction:column; }",
     "#ai-chat-widget-root .widget.open { transform:scale(1) translateY(0); opacity:1; pointer-events:auto; }",
+    "#ai-chat-widget-root .widget.expanded { width:min(420px, calc(100vw - 24px)); height:min(640px, calc(100vh - 60px)); }",
     "#ai-chat-widget-root .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }",
     "#ai-chat-widget-root .avatar { width:30px; height:30px; border-radius:50%; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:10.5px; background-size:cover; background-position:center; }",
     "#ai-chat-widget-root .header h1 { margin:0; font-size:13.5px; font-weight:700; color:#1a1a1a; }",
@@ -249,8 +271,11 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .icon-btn.active svg { stroke:#fff; }",
     "#ai-chat-widget-root .cart-badge { position:absolute; top:-4px; right:-4px; background:#d64545; color:#fff; font-size:9px; font-weight:700; min-width:15px; height:15px; border-radius:999px; display:none; align-items:center; justify-content:center; padding:0 3px; }",
     "#ai-chat-widget-root .cart-badge.show { display:flex; }",
-    "#ai-chat-widget-root .conversation { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; max-height:140px; transition:max-height .32s cubic-bezier(.2,.8,.3,1); padding-right:2px; }",
-    "#ai-chat-widget-root .bubble { border-radius:12px; padding:9px 11px; font-size:11px; line-height:1.45; max-width:92%; }",
+    "#ai-chat-widget-root #expandToggle .icon-collapse { display:none; }",
+    "#ai-chat-widget-root #expandToggle.active-expand .icon-expand { display:none; }",
+    "#ai-chat-widget-root #expandToggle.active-expand .icon-collapse { display:block; }",
+    "#ai-chat-widget-root .conversation { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; padding-right:2px; }",
+    "#ai-chat-widget-root .bubble { border-radius:12px; padding:9px 11px; font-size:11px; line-height:1.45; max-width:92%; overflow-wrap:break-word; word-break:break-word; white-space:pre-wrap; min-width:0; }",
     "#ai-chat-widget-root .bubble.bot { background:rgba(255,255,255,.75); border:1px solid rgba(236,236,236,.8); color:#2a2a2a; box-shadow:0 2px 8px rgba(0,0,0,.05); align-self:flex-start; }",
     "#ai-chat-widget-root .bubble.user { background:#2b2b2b; color:#fff; align-self:flex-end; }",
     "#ai-chat-widget-root .bubble.typing { color:#999; font-style:italic; }",
@@ -298,6 +323,10 @@ WIDGET_JS = r"""
             '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>' +
             '<span class="cart-badge" id="cartBadge">0</span>' +
           "</div>" +
+          '<button class="icon-btn" id="expandToggle" title="Expand chat" aria-label="Expand chat">' +
+            '<svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>' +
+            '<svg class="icon-collapse" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>' +
+          "</button>" +
         "</div>" +
       "</div>" +
       '<div class="conversation" id="conversation">' +
@@ -322,6 +351,7 @@ WIDGET_JS = r"""
   var conversation = document.getElementById("conversation");
   var cartBadge = document.getElementById("cartBadge");
   var ttsToggle = document.getElementById("ttsToggle");
+  var expandToggle = document.getElementById("expandToggle");
   var headerAvatar = document.getElementById("headerAvatar");
   var headerName = document.getElementById("headerName");
   var greetingBubble = document.getElementById("greetingBubble");
@@ -374,6 +404,13 @@ WIDGET_JS = r"""
     if (!ttsEnabled && window.speechSynthesis) window.speechSynthesis.cancel();
   });
 
+  expandToggle.addEventListener("click", function () {
+    var isExpanded = widget.classList.toggle("expanded");
+    expandToggle.classList.toggle("active-expand", isExpanded);
+    expandToggle.title = isExpanded ? "Collapse chat" : "Expand chat";
+    autoResizeConversation();
+  });
+
   var quickActionsRendered = false;
   fab.addEventListener("click", function () {
     var isOpen = widget.classList.toggle("open");
@@ -381,17 +418,9 @@ WIDGET_JS = r"""
     if (isOpen) renderQuickActions();
   });
 
-  var VISIBLE_MESSAGES = 4;
   function autoResizeConversation() {
-    var items = Array.prototype.slice.call(conversation.children, -VISIBLE_MESSAGES);
-    var needed = 0;
-    items.forEach(function (el, idx) { needed += el.offsetHeight; if (idx > 0) needed += 8; });
-    var cap = Math.min(440, window.innerHeight - 220);
-    var target = Math.max(90, Math.min(needed || 90, cap));
-    conversation.style.maxHeight = target + "px";
     requestAnimationFrame(function () { conversation.scrollTop = conversation.scrollHeight; });
   }
-  window.addEventListener("resize", autoResizeConversation);
 
   function addBubble(text, who) {
     var el = document.createElement("div");
