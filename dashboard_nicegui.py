@@ -761,6 +761,83 @@ def dashboard_page():
         with ui.card().classes(CARD_CLASSES + " p-2"):
             _features_dropdown(store, features)
 
+        # ---- Agent Insights ----
+        with ui.card().classes(CARD_CLASSES + " p-5 gap-2"):
+            with ui.row().classes("items-center justify-between mb-1"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("trending_up", size="17px").style(f"color:{BRAND};")
+                    ui.label("Agent-Assisted Cart Adds").classes("font-bold text-gray-900 text-sm")
+                ui.label("Last 14 days").classes("text-xs text-gray-400")
+            ui.label(
+                "The assistant hands checkout off to your store's own Shopify "
+                "cart, so this tracks successful 'add to cart' actions it "
+                "completed for shoppers — the closest signal to agent-driven "
+                "sales available from chat activity."
+            ).classes("text-[11px] text-gray-400 -mt-1 mb-1")
+            _conversions = repo.get_agent_conversions_by_day(store["$id"], days=14)
+            _total_conversions = sum(row["count"] for row in _conversions)
+            if _total_conversions == 0:
+                ui.label(
+                    "No agent-assisted cart adds yet. Once shoppers start adding "
+                    "items via the assistant, the trend will show up here."
+                ).classes("text-xs text-gray-400 py-8 text-center w-full")
+            else:
+                ui.echart({
+                    "grid": {"left": 32, "right": 12, "top": 12, "bottom": 24},
+                    "xAxis": {"type": "category", "data": [row["date"][5:] for row in _conversions],
+                              "axisLabel": {"fontSize": 10}, "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
+                    "yAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                              "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+                    "series": [{
+                        "type": "line", "data": [row["count"] for row in _conversions],
+                        "smooth": True, "symbolSize": 6,
+                        "areaStyle": {"color": BRAND, "opacity": 0.08},
+                        "itemStyle": {"color": BRAND}, "lineStyle": {"color": BRAND, "width": 2},
+                    }],
+                    "tooltip": {"trigger": "axis"},
+                }).classes("w-full").style("height:200px;")
+
+        with ui.row().classes("w-full gap-4 items-stretch").style("flex-wrap:wrap;"):
+            # ---- Most searched / requested products ----
+            with ui.card().classes(CARD_CLASSES + " p-5 gap-2").style("flex:1;min-width:280px;"):
+                with ui.row().classes("items-center gap-2 mb-1"):
+                    ui.icon("search", size="17px").style(f"color:{BRAND};")
+                    ui.label("What Shoppers Search For").classes("font-bold text-gray-900 text-sm")
+                _products = repo.get_top_searched_products(store["$id"], limit=8)
+                if not _products:
+                    ui.label("No product searches logged yet.").classes("text-xs text-gray-400 py-8 text-center w-full")
+                else:
+                    _names = [p[0] for p in reversed(_products)]
+                    _counts = [p[1] for p in reversed(_products)]
+                    ui.echart({
+                        "grid": {"left": 110, "right": 20, "top": 6, "bottom": 6, "containLabel": False},
+                        "xAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                                  "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+                        "yAxis": {"type": "category", "data": _names, "axisLabel": {"fontSize": 10, "width": 100, "overflow": "truncate"}},
+                        "series": [{"type": "bar", "data": _counts, "itemStyle": {"color": BRAND, "borderRadius": [0, 4, 4, 0]}, "barMaxWidth": 16}],
+                        "tooltip": {"trigger": "axis"},
+                    }).classes("w-full").style(f"height:{max(180, 30 * len(_products) + 20)}px;")
+
+            # ---- Most used agent features ----
+            with ui.card().classes(CARD_CLASSES + " p-5 gap-2").style("flex:1;min-width:280px;"):
+                with ui.row().classes("items-center gap-2 mb-1"):
+                    ui.icon("bar_chart", size="17px").style(f"color:{BRAND};")
+                    ui.label("Most-Used Agent Features").classes("font-bold text-gray-900 text-sm")
+                _features = repo.get_top_features_used(store["$id"], limit=8)
+                if not _features:
+                    ui.label("No chat activity logged yet.").classes("text-xs text-gray-400 py-8 text-center w-full")
+                else:
+                    _flabels = [repo.INTENT_LABELS.get(k, (k.replace("_", " ").title(), "help_outline"))[0] for k, _ in reversed(_features)]
+                    _fcounts = [v for _, v in reversed(_features)]
+                    ui.echart({
+                        "grid": {"left": 130, "right": 20, "top": 6, "bottom": 6, "containLabel": False},
+                        "xAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                                  "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+                        "yAxis": {"type": "category", "data": _flabels, "axisLabel": {"fontSize": 10, "width": 120, "overflow": "truncate"}},
+                        "series": [{"type": "bar", "data": _fcounts, "itemStyle": {"color": "#6B7280", "borderRadius": [0, 4, 4, 0]}, "barMaxWidth": 16}],
+                        "tooltip": {"trigger": "axis"},
+                    }).classes("w-full").style(f"height:{max(180, 30 * len(_features) + 20)}px;")
+
         # ---- Quick Actions ----
         with ui.card().classes(CARD_CLASSES + " p-5 gap-1"):
             with ui.row().classes("items-center gap-2 mb-1"):
