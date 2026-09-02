@@ -791,39 +791,40 @@ def dashboard_page():
                         if total == 0:
                             ui.label(
                                 "No agent-assisted cart adds yet. Once shoppers start adding "
-                                "items via the assistant, the breakdown will show up here."
+                                "items via the assistant, the trend will show up here."
                             ).classes("text-xs text-gray-400 py-8 text-center w-full")
                         else:
                             ui.echart({
-                                "tooltip": {"trigger": "item"},
-                                "legend": {"bottom": 0, "textStyle": {"fontSize": 10}},
+                                "grid": {"left": 32, "right": 12, "top": 12, "bottom": 24},
+                                "xAxis": {"type": "category", "data": [row["date"][5:] for row in conversions],
+                                          "axisLabel": {"fontSize": 10}, "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
+                                "yAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                                          "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
                                 "series": [{
-                                    "type": "pie", "radius": ["35%", "70%"],
-                                    "data": [
-                                        {"value": row["count"], "name": row["date"][5:]}
-                                        for row in conversions if row["count"] > 0
-                                    ],
-                                    "label": {"fontSize": 10},
-                                    "itemStyle": {"borderRadius": 4, "borderColor": "#fff", "borderWidth": 2},
+                                    "type": "line", "data": [row["count"] for row in conversions],
+                                    "smooth": True, "symbolSize": 6,
+                                    "areaStyle": {"color": BRAND, "opacity": 0.08},
+                                    "itemStyle": {"color": BRAND}, "lineStyle": {"color": BRAND, "width": 2},
                                 }],
-                                "color": ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937", "#D1D5DB", "#111827", "#E5E7EB"],
-                            }).classes("w-full").style("height:280px;")
+                                "tooltip": {"trigger": "axis"},
+                            }).classes("w-full").style("height:200px;")
 
                     elif key == "products":
                         products = repo.get_top_searched_products(store["$id"], limit=8)
                         if not products:
                             ui.label("No product searches logged yet.").classes("text-xs text-gray-400 py-8 text-center w-full")
                         else:
-                            names = [p[0] for p in reversed(products)]
-                            counts = [p[1] for p in reversed(products)]
                             ui.echart({
-                                "grid": {"left": 110, "right": 20, "top": 6, "bottom": 6, "containLabel": False},
-                                "xAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
-                                          "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
-                                "yAxis": {"type": "category", "data": names, "axisLabel": {"fontSize": 10, "width": 100, "overflow": "truncate"}},
-                                "series": [{"type": "bar", "data": counts, "itemStyle": {"color": BRAND, "borderRadius": [0, 4, 4, 0]}, "barMaxWidth": 16}],
-                                "tooltip": {"trigger": "axis"},
-                            }).classes("w-full").style(f"height:{max(180, 30 * len(products) + 20)}px;")
+                                "tooltip": {"trigger": "item"},
+                                "legend": {"bottom": 0, "textStyle": {"fontSize": 10}},
+                                "series": [{
+                                    "type": "pie", "radius": ["35%", "70%"],
+                                    "data": [{"value": count, "name": name} for name, count in products],
+                                    "label": {"fontSize": 10},
+                                    "itemStyle": {"borderRadius": 4, "borderColor": "#fff", "borderWidth": 2},
+                                }],
+                                "color": ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937", "#D1D5DB", "#111827", "#E5E7EB"],
+                            }).classes("w-full").style("height:280px;")
 
                     elif key == "features":
                         features_used = repo.get_top_features_used(store["$id"], limit=8)
