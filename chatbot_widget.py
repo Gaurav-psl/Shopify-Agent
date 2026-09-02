@@ -242,6 +242,7 @@ WIDGET_JS = r"""
   var ORIGIN = THIS_SCRIPT ? new URL(THIS_SCRIPT.src).origin : "";
   var CFG = {
     chatEndpoint: ORIGIN + "/chat",
+    confirmEndpoint: ORIGIN + "/confirm",
     configEndpoint: ORIGIN + "/widget-config?shop=" + encodeURIComponent(SHOP)
   };
 
@@ -285,12 +286,19 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .quick-action-btn.show { opacity:1; transform:translateY(0); }",
     "#ai-chat-widget-root .quick-action-btn:hover { background:#f0f0f0; }",
     "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; align-self:flex-start; max-width:100%; }",
-    "#ai-chat-widget-root .product-card { flex:0 0 auto; width:110px; border:1px solid #ececec; border-radius:10px; padding:6px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); display:flex; flex-direction:column; gap:4px; }",
+    "#ai-chat-widget-root .product-card { flex:0 0 auto; width:110px; border:1px solid #ececec; border-radius:10px; padding:6px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); display:flex; flex-direction:column; gap:4px; cursor:pointer; transition:box-shadow .15s ease, transform .15s ease; }",
+    "#ai-chat-widget-root .product-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateY(-1px); }",
     "#ai-chat-widget-root .product-card img { width:100%; height:70px; object-fit:cover; border-radius:6px; background:#f2f2f2; }",
     "#ai-chat-widget-root .product-card .p-name { font-size:10px; font-weight:600; color:#222; max-height:26px; overflow:hidden; }",
     "#ai-chat-widget-root .product-card .p-price { font-size:10.5px; font-weight:700; color:#2b2b2b; }",
     "#ai-chat-widget-root .product-card button { margin-top:2px; border:none; background:#2b2b2b; color:#fff; font-size:9.5px; padding:3px 0; border-radius:999px; cursor:pointer; }",
     "#ai-chat-widget-root .product-card button:disabled { background:#9c9c9c; }",
+    "#ai-chat-widget-root .confirm-row { display:flex; gap:8px; align-self:flex-start; }",
+    "#ai-chat-widget-root .confirm-btn { border:none; font-size:11px; font-weight:700; padding:6px 16px; border-radius:999px; cursor:pointer; transition:opacity .15s ease, transform .1s ease; }",
+    "#ai-chat-widget-root .confirm-btn:active { transform:scale(.96); }",
+    "#ai-chat-widget-root .confirm-btn:disabled { opacity:.5; cursor:default; }",
+    "#ai-chat-widget-root .confirm-btn.confirm-yes { background:#1f9d55; color:#fff; }",
+    "#ai-chat-widget-root .confirm-btn.confirm-no { background:#e2e2e2; color:#2b2b2b; }",
     "#ai-chat-widget-root .input-row { position:relative;margin-top:15px; }",
     "#ai-chat-widget-root .input-row input { width:100%; padding:15px 52px 15px 16px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:13px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
     "#ai-chat-widget-root .mic-btn { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border-radius:50%; background:#2b2b2b; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease, box-shadow .08s ease, transform .08s ease; }",
@@ -390,6 +398,26 @@ WIDGET_JS = r"""
     }
   })();
 
+  // --------------------------------------------------------------------
+  // Cross-page persistence: Shopify does a full page reload on nearly
+  // every navigation, so any in-memory chat state is normally lost.
+  // We mirror open/expanded state + the full message history to
+  // sessionStorage (scoped to this browser tab's session, same lifetime
+  // as SESSION_ID above) and replay it back into the DOM on load.
+  // --------------------------------------------------------------------
+  var STATE_KEY = "aiChatWidgetState_" + SHOP;
+  var chatHistory = [];
+  function persistState() {
+    try {
+      sessionStorage.setItem(STATE_KEY, JSON.stringify({
+        open: widget.classList.contains("open"),
+        expanded: widget.classList.contains("expanded"),
+        quickActionsShown: quickActionsRendered,
+        history: chatHistory
+      }));
+    } catch (e) { /* storage unavailable/full — chat still works, just won't persist */ }
+  }
+
   var ttsEnabled = false;
   function speak(text) {
     if (!ttsEnabled || !window.speechSynthesis) return;
@@ -409,6 +437,7 @@ WIDGET_JS = r"""
     expandToggle.classList.toggle("active-expand", isExpanded);
     expandToggle.title = isExpanded ? "Collapse chat" : "Expand chat";
     autoResizeConversation();
+    persistState();
   });
 
   var quickActionsRendered = false;
@@ -416,23 +445,29 @@ WIDGET_JS = r"""
     var isOpen = widget.classList.toggle("open");
     fab.classList.toggle("open", isOpen);
     if (isOpen) renderQuickActions();
+    persistState();
   });
 
   function autoResizeConversation() {
     requestAnimationFrame(function () { conversation.scrollTop = conversation.scrollHeight; });
   }
 
-  function addBubble(text, who) {
+  function addBubble(text, who, opts) {
+    opts = opts || {};
     var el = document.createElement("div");
     el.className = "bubble " + who;
     el.textContent = text;
     conversation.appendChild(el);
     autoResizeConversation();
-    if (who === "bot") speak(text);
+    if (who.indexOf("typing") === -1) {
+      if (opts.record !== false) { chatHistory.push({ type: "bubble", text: text, who: who }); persistState(); }
+      if (who === "bot" && !opts.silent) speak(text);
+    }
     return el;
   }
 
-  function addProductRow(products) {
+  function addProductRow(products, opts) {
+    opts = opts || {};
     var row = document.createElement("div");
     row.className = "product-row";
     products.forEach(function (p) {
@@ -447,12 +482,75 @@ WIDGET_JS = r"""
       price.textContent = p.price !== undefined ? "$" + p.price : "";
       var btn = document.createElement("button");
       btn.textContent = "Add to cart";
-      btn.addEventListener("click", function () { cartAdd(p.id, 1, btn); });
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        cartAdd(p.id, 1, btn);
+      });
       card.appendChild(img); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
+      if (p.url) {
+        card.addEventListener("click", function () { window.location.href = p.url; });
+      }
       row.appendChild(card);
     });
     conversation.appendChild(row);
     autoResizeConversation();
+    if (opts.record !== false) { chatHistory.push({ type: "products", products: products }); persistState(); }
+  }
+
+  // --------------------------------------------------------------------
+  // Yes/No confirmation prompts. The backend already has a full pending-
+  // confirmation flow (see /chat and /confirm in this file): when /chat
+  // returns status "confirmation_required", it means the shopper's
+  // request is parked server-side awaiting a yes/no. We render buttons
+  // that call POST /confirm with { session_id, shop, confirmed } — that
+  // endpoint runs the pending action (or cancels it) and returns a
+  // normal chat-shaped response (reply / products / widget_action).
+  // --------------------------------------------------------------------
+  function handleChatResponse(data) {
+    addBubble(data.reply || "(no reply)", "bot");
+    if (Array.isArray(data.products) && data.products.length > 0) addProductRow(data.products);
+    if (data.status === "confirmation_required") addConfirmationButtons();
+    if (data.widget_action) runWidgetAction(data.widget_action);
+    refreshCartBadge();
+  }
+
+  function addConfirmationButtons(opts) {
+    opts = opts || {};
+    var confirmId = opts.id || (Date.now() + "_" + Math.random().toString(36).slice(2));
+    var row = document.createElement("div");
+    row.className = "confirm-row";
+    [{ label: "Yes", cls: "confirm-yes", confirmed: true }, { label: "No", cls: "confirm-no", confirmed: false }].forEach(function (opt) {
+      var btn = document.createElement("button");
+      btn.className = "confirm-btn " + opt.cls;
+      btn.textContent = opt.label;
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(row.querySelectorAll("button"), function (b) { b.disabled = true; });
+        chatHistory = chatHistory.filter(function (item) { return !(item.type === "confirm" && item.id === confirmId); });
+        persistState();
+        row.remove();
+        addBubble(opt.label, "user");
+        var typingEl = addBubble("typing\u2026", "bot typing");
+        fetch(CFG.confirmEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed })
+        })
+          .then(function (res) { return res.json(); })
+          .then(function (data) { typingEl.remove(); handleChatResponse(data); })
+          .catch(function () {
+            typingEl.remove();
+            addBubble("Sorry, I could not reach the server. Please try again.", "bot");
+          });
+      });
+      row.appendChild(btn);
+    });
+    conversation.appendChild(row);
+    autoResizeConversation();
+    if (opts.record !== false) {
+      chatHistory.push({ type: "confirm", id: confirmId });
+      persistState();
+    }
+    return row;
   }
 
   function updateCartBadge(count) {
@@ -592,10 +690,7 @@ WIDGET_JS = r"""
       .then(function (res) { return res.json(); })
       .then(function (data) {
         typingEl.remove();
-        addBubble(data.reply || "(no reply)", "bot");
-        if (Array.isArray(data.products) && data.products.length > 0) addProductRow(data.products);
-        if (data.widget_action) runWidgetAction(data.widget_action);
-        refreshCartBadge();
+        handleChatResponse(data);
       })
       .catch(function () {
         typingEl.remove();
@@ -606,6 +701,34 @@ WIDGET_JS = r"""
   input.addEventListener("input", function () {
     micBtn.classList.toggle("has-text", input.value.trim().length > 0);
   });
+
+  // Replay persisted state (previous page's conversation + open/expanded
+  // state), if any, before the first paint-affecting network call.
+  (function restoreState() {
+    var saved = null;
+    try {
+      var raw = sessionStorage.getItem(STATE_KEY);
+      if (raw) saved = JSON.parse(raw);
+    } catch (e) { saved = null; }
+    if (!saved) return;
+
+    (saved.history || []).forEach(function (item) {
+      if (item.type === "bubble") addBubble(item.text, item.who, { record: false, silent: true });
+      else if (item.type === "products") addProductRow(item.products, { record: false });
+      else if (item.type === "confirm") addConfirmationButtons({ record: false, id: item.id });
+    });
+    chatHistory = saved.history || [];
+
+    if (saved.quickActionsShown) renderQuickActions();
+    if (saved.open) { widget.classList.add("open"); fab.classList.add("open"); }
+    if (saved.expanded) {
+      widget.classList.add("expanded");
+      expandToggle.classList.add("active-expand");
+      expandToggle.title = "Collapse chat";
+    }
+    autoResizeConversation();
+  })();
+
   refreshCartBadge();
 
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
