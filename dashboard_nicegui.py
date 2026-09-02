@@ -30,8 +30,6 @@ BRAND = "#4B5563"
 BRAND_SOFT = "#F3F4F6"
 PAGE_BG = "#F3F4F6"
 
-UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "static/uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # The exact Client ID Shopify issued for this app. This MUST match
 # whatever env var shopify_auth.py already uses for OAuth (it may be
@@ -1172,6 +1170,7 @@ def appearance_page():
                     ui.image(cfg["custom_icon_url"]).classes("w-10 h-10 rounded-full")
 
                     def delete_icon():
+                        repo.delete_icon_file(cfg.get("custom_icon_url", ""))
                         repo.update_customization(store["$id"], custom_icon_url="", icon_type="preset")
                         icon_preview_row.clear()
                         ui.notify("Icon removed — refresh to see it applied.", type="positive")
@@ -1181,15 +1180,12 @@ def appearance_page():
                     ).style("color:#DC2626;")
 
             def handle_upload(e):
-                import shutil
-                import uuid as _uuid
-
-                ext = os.path.splitext(e.name)[1] or ".png"
-                filename = f"{store['$id']}_{_uuid.uuid4().hex}{ext}"
-                filepath = os.path.join(UPLOAD_DIR, filename)
-                with open(filepath, "wb") as f:
-                    shutil.copyfileobj(e.content, f)
-                repo.update_customization(store["$id"], custom_icon_url=f"/{filepath}", icon_type="custom")
+                content = e.content.read()
+                new_url = repo.upload_icon_file(store["$id"], e.name, content)
+                old_url = cfg.get("custom_icon_url", "")
+                repo.update_customization(store["$id"], custom_icon_url=new_url, icon_type="custom")
+                if old_url:
+                    repo.delete_icon_file(old_url)
                 ui.notify("Icon uploaded — refresh to see it applied.", type="positive")
 
             ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/*").classes("w-full")
