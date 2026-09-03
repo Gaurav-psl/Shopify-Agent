@@ -92,20 +92,68 @@ def _find_action(schema: dict, intent_name: str, action_name: str) -> dict | Non
     return None
 
 
-def classify_intent(user_message: str, schema: dict | None = None) -> dict:
+_FAST_GREETINGS = {
+    "hi", "hello", "hey", "hiya", "good morning", "good evening", "good afternoon",
+    "namaste", "hola", "bonjour", "hallo", "salam", "sat sri akaal", "vanakkam",
+}
+_FAST_THANKS = {"thanks", "thank you", "thx", "thank you so much", "dhanyawad", "shukriya", "merci", "gracias"}
+_FAST_GOODBYES = {"bye", "goodbye", "cya", "see you", "have a good day", "have a nice day", "alvida"}
+
+
+def _check_fast_path(user_message: str) -> dict | None:
+    cleaned = re.sub(r"[^\w\s]", "", user_message.lower()).strip()
+    if cleaned in _FAST_GREETINGS:
+        return {
+            "intent": "smalltalk",
+            "action": "greet",
+            "entities": {},
+            "confidence": 1.0,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if cleaned in _FAST_THANKS:
+        return {
+            "intent": "smalltalk",
+            "action": "thank_you",
+            "entities": {},
+            "confidence": 1.0,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if cleaned in _FAST_GOODBYES:
+        return {
+            "intent": "smalltalk",
+            "action": "say_goodbye",
+            "entities": {},
+            "confidence": 1.0,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    return None
+
+
+def classify_intent(user_message: str, schema: dict | None = None, history: list[dict] | None = None) -> dict:
     """Classify a single user message. Returns a dict matching
     classification_output_format from the schema, with requires_confirmation
     filled in from the schema (not trusted from the model's own output)."""
+    fast = _check_fast_path(user_message)
+    if fast:
+        return fast
+
     schema = schema or load_schema()
     system_prompt = build_system_prompt(schema)
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        for turn in history[-2:]:
+            if isinstance(turn, dict) and "role" in turn and "content" in turn:
+                messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": user_message})
 
     response = _get_client().chat.completions.create(
         model=MODEL,
         response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        messages=messages,
         temperature=0,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )

@@ -107,6 +107,25 @@
     },
 
     {
+      "name": "smalltalk",
+      "description": "User is greeting, saying goodbye, thanking the assistant, or asking how the assistant can help.",
+      "actions": [
+        { "name": "greet", "requires_confirmation": false },
+        { "name": "thank_you", "requires_confirmation": false },
+        { "name": "say_goodbye", "requires_confirmation": false }
+      ],
+      "required_entities": [],
+      "optional_entities": [],
+      "example_utterances": [
+        "Hello",
+        "Hi there",
+        "Good morning",
+        "Thank you so much",
+        "Bye, have a great day"
+      ]
+    },
+
+    {
       "name": "fallback",
       "description": "Message doesn't clearly match any defined intent, or confidence is too low to act on. Agent should ask a clarifying question rather than guess.",
       "actions": [

@@ -149,9 +149,19 @@ async def _resolve_variant(store, product_query: str) -> dict | None:
     if not product_query:
         return None
     resp = await _get(store, "products.json", {"title": product_query, "status": "active", "limit": 5})
-    if resp.status_code != 200:
-        return None
-    products = resp.json().get("products", [])
+    products = resp.json().get("products", []) if resp.status_code == 200 else []
+
+    # If exact title lookup returned no match, search across active products
+    if not products:
+        all_resp = await _get(store, "products.json", {"status": "active", "limit": 50})
+        if all_resp.status_code == 200:
+            q_lower = product_query.lower().strip()
+            for p in all_resp.json().get("products", []):
+                p_text = f"{p.get('title', '')} {p.get('product_type', '')} {p.get('tags', '')}".lower()
+                if q_lower in p_text or any(w in p_text for w in q_lower.split() if len(w) > 2):
+                    products.append(p)
+                    break
+
     if not products:
         return None
     product = products[0]
@@ -162,6 +172,7 @@ async def _resolve_variant(store, product_query: str) -> dict | None:
         "name": product.get("title"),
         "price": variant.get("price"),
         "image": (product.get("image") or {}).get("src", ""),
+        "url": f"https://{store.shop_domain}/products/{product.get('handle', '')}",
     }
 
 
@@ -254,7 +265,7 @@ async def check_claim_status(store, entities: dict) -> dict:
 # ==========================================================================
 async def search_products(store, entities: dict) -> dict:
     params = {"status": "active", "limit": 10}
-    query = entities.get("query") or entities.get("category")
+    query = (entities.get("query") or entities.get("category") or "").strip()
     if query:
         params["title"] = query
 
@@ -262,13 +273,26 @@ async def search_products(store, entities: dict) -> dict:
     if resp.status_code != 200:
         return {"error": "lookup_failed"}
 
+    products = resp.json().get("products", [])
+
+    # If title search returned nothing, fall back to broader active products search
+    if not products and query:
+        all_resp = await _get(store, "products.json", {"status": "active", "limit": 50})
+        if all_resp.status_code == 200:
+            q_lower = query.lower()
+            q_words = [w for w in q_lower.split() if len(w) > 2]
+            for p in all_resp.json().get("products", []):
+                p_text = f"{p.get('title', '')} {p.get('product_type', '')} {p.get('tags', '')} {p.get('body_html', '')}".lower()
+                if q_lower in p_text or (q_words and any(w in p_text for w in q_words)):
+                    products.append(p)
+
     price_min = entities.get("price_min")
     price_max = entities.get("price_max")
     color = (entities.get("color") or "").lower()
     size = (entities.get("size") or "").lower()
 
     results = []
-    for p in resp.json().get("products", []):
+    for p in products:
         for variant in p.get("variants", [{}]):
             price = float(variant.get("price", 0) or 0)
             if price_min is not None and price < float(price_min):
@@ -282,9 +306,11 @@ async def search_products(store, entities: dict) -> dict:
                 continue
             results.append({
                 "id": str(variant.get("id")),
+                "product_id": str(p.get("id")),
                 "name": p.get("title", "Unnamed product"),
                 "price": price,
                 "image": (p.get("image") or {}).get("src", ""),
+                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}",
             })
             break
         if len(results) >= 6:
@@ -319,10 +345,35 @@ async def answer_policy_question(store, entities: dict) -> dict:
         if field and (field.replace("_policy", "") in title or field in title):
             return {"policy_type": policy_type, "title": p.get("title"), "body": p.get("body"), "url": p.get("url")}
 
+    # If asking for warranty policy, check if refund policy or terms mention warranty
     if policy_type == "warranty_policy":
+        for p in policies:
+            body = (p.get("body") or "").lower()
+            if "warranty" in body or "guarantee" in body:
+                return {
+                    "policy_type": policy_type,
+                    "title": f"Warranty section in {p.get('title')}",
+                    "body": p.get("body"),
+                    "url": p.get("url"),
+                }
         return {"policy_type": policy_type, "not_found": True, "note": "This store has not published a separate warranty policy."}
 
     return {"policy_type": policy_type, "not_found": True}
+
+
+# ==========================================================================
+# smalltalk
+# ==========================================================================
+async def greet(store, entities: dict) -> dict:
+    return {"status": "greet", "message": "Hello! Welcome to our store. How can I assist you today?"}
+
+
+async def thank_you(store, entities: dict) -> dict:
+    return {"status": "thank_you", "message": "You're very welcome! Let me know if you need any further help."}
+
+
+async def say_goodbye(store, entities: dict) -> dict:
+    return {"status": "say_goodbye", "message": "Goodbye! Have a great day and happy shopping."}
 
 
 # ==========================================================================
@@ -350,6 +401,9 @@ ACTION_MAP = {
     "warranty_claim.check_claim_status": check_claim_status,
     "product_search.search_products": search_products,
     "policy_query.answer_policy_question": answer_policy_question,
+    "smalltalk.greet": greet,
+    "smalltalk.thank_you": thank_you,
+    "smalltalk.say_goodbye": say_goodbye,
     "fallback.clarify": clarify,
 }
 
