@@ -60,7 +60,6 @@ FEATURE_LIST = [
 STATUS_STYLES = {
     "active": {"bg": "#E5E7EB", "text": "#111827", "dot": "#22C55E", "label": "Active"},
     "inactive": {"bg": "#F3F4F6", "text": "#9CA3AF", "dot": "#EF4444", "label": "Inactive"},
-    "maintenance": {"bg": "#F3F4F6", "text": "#6B7280", "dot": "#F97316", "label": "Maintenance"},
 }
 
 THEME_SWATCHES = ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937"]
@@ -1009,7 +1008,7 @@ def agent_page():
                                 b.style("background:white;color:#6B7280;border-radius:999px;border:1px solid #E5E7EB;")
 
                 render_status_buttons()
-                ui.label('"Inactive" or "Maintenance" stops the widget from responding to shoppers.').classes(
+                ui.label('"Inactive" stops the widget from responding to shoppers.').classes(
                     "text-[11px] text-gray-400"
                 )
 
