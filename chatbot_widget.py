@@ -712,14 +712,14 @@ WIDGET_JS = r"""
     } catch (e) { saved = null; }
     if (!saved) return;
 
+    if (saved.quickActionsShown) renderQuickActions();
+
     (saved.history || []).forEach(function (item) {
       if (item.type === "bubble") addBubble(item.text, item.who, { record: false, silent: true });
       else if (item.type === "products") addProductRow(item.products, { record: false });
       else if (item.type === "confirm") addConfirmationButtons({ record: false, id: item.id });
     });
     chatHistory = saved.history || [];
-
-    if (saved.quickActionsShown) renderQuickActions();
     if (saved.open) { widget.classList.add("open"); fab.classList.add("open"); }
     if (saved.expanded) {
       widget.classList.add("expanded");
