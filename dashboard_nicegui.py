@@ -4,7 +4,7 @@ dashboard_nicegui.py
 The full "RenderLink" dashboard, built with NiceGUI to match the
 original DashboardApp.jsx layout element-for-element: sidebar with a
 "Need help?" card and account block, a full topbar (store pill, status
-pill, App Info modal, Help, notification bell, avatar), a Features
+pill, App Info modal, Help, avatar), a Features
 dropdown that opens a right-side slide panel per feature (not a flat
 list), a richer Overview page with a live widget preview bubble, and
 matching iconography throughout (NiceGUI ships Material Icons, used
@@ -324,10 +324,6 @@ def _layout(active_key: str, store: dict, agent: dict):
             ui.button("Help", icon="help_outline", on_click=lambda: _goto("/dashboard/feedback")).props(
                 "no-caps flat"
             ).classes("px-3 py-1.5 text-xs font-semibold").style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
-
-            ui.button(icon="notifications").props("flat round dense").style(
-                "border:1px solid #E5E7EB;color:#6B7280;width:32px;height:32px;"
-            )
 
             with ui.element("div").classes("w-8 h-8 rounded-full flex items-center justify-center").style(
                 f"background:{BRAND};color:white;font-size:12px;font-weight:700;"
@@ -852,7 +848,7 @@ def dashboard_page():
                 ui.icon("bolt", size="17px").style(f"color:{BRAND};")
                 ui.label("Quick Actions").classes("font-bold text-gray-900 text-sm")
             quick = [
-                ("palette", "Customize Appearance", "Change colors, icon & position", "appearance"),
+                ("palette", "Customize Appearance", "Change colors & icon", "appearance"),
                 ("menu_book", "Manage FAQs", "Add or edit knowledge base", "knowledge"),
                 ("storefront", "Store Information", "Update your store details", "store"),
                 ("smart_toy", "AI Agent Settings", "Name, instructions & status", "agent"),
@@ -1105,7 +1101,6 @@ def appearance_page():
         _page_header("Appearance", "Customize how the chat widget looks on your storefront.")
 
         color_value = {"v": cfg.get("theme_color", "#2b2b2b")}
-        position_value = {"v": cfg.get("widget_position", "bottom-right")}
 
         with ui.card().classes(CARD_CLASSES + " p-6 gap-3"):
             ui.label("Theme color").classes("text-xs font-semibold text-gray-600")
@@ -1126,30 +1121,12 @@ def appearance_page():
 
             welcome = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
 
-            ui.label("Widget position").classes("text-xs font-semibold text-gray-600 mt-1")
-            with ui.row().classes("gap-2") as position_row:
-                pass
-
-            def render_positions():
-                position_row.clear()
-                with position_row:
-                    for p, label in [("bottom-right", "Bottom right"), ("bottom-left", "Bottom left")]:
-                        selected = position_value["v"] == p
-                        b = ui.button(label, on_click=lambda p=p: (position_value.update(v=p), render_positions())).props("no-caps flat")
-                        if selected:
-                            b.style(f"background:{BRAND_SOFT};color:{BRAND};border-radius:8px;border:1px solid {BRAND};")
-                        else:
-                            b.style("background:white;color:#6B7280;border-radius:8px;border:1px solid #E5E7EB;")
-
-            render_positions()
-
             saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
 
             def save():
                 repo.update_customization(
                     store["$id"],
                     theme_color=color_value["v"],
-                    widget_position=position_value["v"],
                     agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
                 )
                 saved_label.text = "Saved ✓"
