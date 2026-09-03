@@ -129,6 +129,10 @@ async def chat(req: ChatRequest):
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
 
+    cfg = repo.ensure_customization(store["$id"])
+    if cfg.get("status", "active") == "inactive":
+        return {"reply": "This assistant isn't available right now."}
+
     _prune_pending()
     pending = PENDING.get(req.session_id)
 
@@ -192,6 +196,10 @@ async def confirm(req: ConfirmRequest):
     if not store:
         return {"reply": "Sorry, I couldn't verify this store."}
 
+    cfg = repo.ensure_customization(store["$id"])
+    if cfg.get("status", "active") == "inactive":
+        return {"reply": "This assistant isn't available right now."}
+
     pending = PENDING.pop(req.session_id, None)
     if not pending:
         return {"status": "expired", "reply": "That request has expired — please ask again."}
@@ -213,6 +221,7 @@ async def widget_config(shop: str):
         return {"error": "unknown store"}
     cfg = repo.ensure_customization(store["$id"])
     return {
+        "status": cfg.get("status", "active"),
         "agent_name": cfg.get("agent_name", "AI Assistant"),
         "agent_title": cfg.get("agent_title", "How can I help you today?"),
         "icon_type": cfg.get("icon_type", "preset"),
@@ -348,6 +357,7 @@ WIDGET_JS = r"""
       "</div>" +
       '<div class="mic-status" id="micStatus"></div>' +
     "</div>";
+  root.style.display = "none"; // hidden until /widget-config confirms this shop's widget is active
   document.body.appendChild(root);
 
   var fab = document.getElementById("chatFab");
@@ -366,6 +376,11 @@ WIDGET_JS = r"""
   fetch(CFG.configEndpoint)
     .then(function (r) { return r.json(); })
     .then(function (cfg) {
+      if (cfg && cfg.status === "inactive") {
+        root.remove(); // shop turned the widget off — take it off the page entirely
+        return;
+      }
+      root.style.display = "";
       if (!cfg || cfg.error) return;
       headerName.textContent = cfg.agent_name || "AI Assistant";
       greetingBubble.textContent = cfg.agent_title || "Hi! How can I help you today?";
@@ -382,7 +397,7 @@ WIDGET_JS = r"""
         headerAvatar.style.background = color;
       }
     })
-    .catch(function () { /* fall back to defaults already in the markup */ });
+    .catch(function () { root.style.display = ""; /* fall back to defaults already in the markup */ });
 
   var SESSION_ID = (function () {
     try {
