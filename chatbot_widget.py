@@ -129,7 +129,7 @@ async def chat(req: ChatRequest):
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
 
-    cfg = repo.ensure_customization(store["$id"])
+    cfg = repo.ensure_customization(store.id)  # cfg = repo.ensure_customization(store["$id"])
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
