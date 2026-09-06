@@ -162,8 +162,17 @@ async def chat(req: ChatRequest):
             cancel_reply = generate_reply("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message)
             _log(req.shop, message, "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
             return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
-        # Anything else: treat as the shopper moving on to a new request.
-        PENDING.pop(req.session_id, None)
+    clean_text = message.lower().strip(" .!?,")
+    _GREETING_WORDS = {
+        "hi", "hello", "hey", "hey there", "hi there", "hello there", "good morning",
+        "good afternoon", "good evening", "howdy", "sup", "yo", "namaste", "hola",
+        "hi bot", "hello bot", "hey bot", "help", "who are you"
+    }
+    if clean_text in _GREETING_WORDS:
+        bot_name = cfg.get("agent_name") or "Dripire"
+        reply = f"Hello! Welcome to {bot_name}. How can I help you today? Feel free to ask for top recommendations, search products, track an order, or check your cart!"
+        _log(req.shop, message, "done", "greeting", "greet", {}, reply)
+        return {"status": "done", "reply": reply, "language": "en", "intent": "greeting", "action": "greet"}
 
     try:
         classification = classify_intent(message, SCHEMA)
@@ -246,7 +255,15 @@ async def widget_config(shop: str):
 
 @router.get("/widget.js")
 async def widget_js():
-    return Response(content=WIDGET_JS, media_type="application/javascript")
+    return Response(
+        content=WIDGET_JS,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # --------------------------------------------------------------------------
@@ -298,13 +315,15 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root #expandToggle .icon-collapse { display:none; }",
     "#ai-chat-widget-root #expandToggle.active-expand .icon-expand { display:none; }",
     "#ai-chat-widget-root #expandToggle.active-expand .icon-collapse { display:block; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar, #ai-chat-widget-root .product-row::-webkit-scrollbar { width:5px !important; height:5px !important; background:transparent !important; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-track, #ai-chat-widget-root .product-row::-webkit-scrollbar-track { background:rgba(0,0,0,.08) !important; border-radius:999px !important; margin:4px 0 !important; border:none !important; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb, #ai-chat-widget-root .product-row::-webkit-scrollbar-thumb { background:rgba(43,43,43,.55) !important; border-radius:999px !important; border:none !important; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb:hover, #ai-chat-widget-root .product-row::-webkit-scrollbar-thumb:hover { background:#2b2b2b !important; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-button, #ai-chat-widget-root .conversation::-webkit-scrollbar-button:single-button, #ai-chat-widget-root .product-row::-webkit-scrollbar-button, #ai-chat-widget-root .product-row::-webkit-scrollbar-button:single-button { display:none !important; width:0 !important; height:0 !important; background:transparent !important; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-corner, #ai-chat-widget-root .product-row::-webkit-scrollbar-corner { background:transparent !important; }",
-    "#ai-chat-widget-root .conversation { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; padding-right:5px; }",
+    "#ai-chat-widget-root .conversation { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; padding-right:5px; scrollbar-width:thin !important; scrollbar-color:rgba(43,43,43,.35) transparent !important; }",
+    "#ai-chat-widget-root .conversation::-webkit-scrollbar { width:5px !important; background:transparent !important; }",
+    "#ai-chat-widget-root .conversation::-webkit-scrollbar-track { background:transparent !important; border:none !important; }",
+    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb { background:rgba(43,43,43,.35) !important; border-radius:999px !important; border:none !important; }",
+    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb:hover { background:rgba(43,43,43,.65) !important; }",
+    "#ai-chat-widget-root .conversation::-webkit-scrollbar-button, #ai-chat-widget-root .conversation::-webkit-scrollbar-button:single-button { display:none !important; width:0 !important; height:0 !important; }",
+    "#ai-chat-widget-root .conversation::-webkit-scrollbar-corner { background:transparent !important; }",
+    "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 6px; align-self:flex-start; max-width:100%; flex-shrink:0; scrollbar-width:none !important; -ms-overflow-style:none !important; }",
+    "#ai-chat-widget-root .product-row::-webkit-scrollbar { display:none !important; width:0 !important; height:0 !important; background:transparent !important; }",
     "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:12px; padding:9px 11px; font-size:11px; line-height:1.45; width:fit-content; max-width:92%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; flex-shrink:0; }",
     "#ai-chat-widget-root .bubble.bot { background:rgba(255,255,255,.75) !important; border:1px solid rgba(236,236,236,.8); color:#2a2a2a; box-shadow:0 2px 8px rgba(0,0,0,.05); align-self:flex-start; }",
     "#ai-chat-widget-root .bubble.user { background:#2b2b2b !important; color:#fff; align-self:flex-end; }",
