@@ -110,8 +110,20 @@ def classify_intent(user_message: str, schema: dict | None = None) -> dict:
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     raw = _strip_thinking(response.choices[0].message.content)
-    result = json.loads(raw)
+    # result = json.loads(raw)
 
+    try:
+        result = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"intent_classifier: model returned unparseable content ({e!r}); raw={raw!r}")
+        return {
+            "intent": "fallback",
+            "action": "clarify",
+            "entities": {},
+            "confidence": 0.0,
+            "requires_confirmation": False,
+            "language": "en",
+        }
     # Don't trust the model's own confidence/requires_confirmation blindly —
     # cross-check against the schema and fall back safely if anything looks off.
     intent_name = result.get("intent", "fallback")
