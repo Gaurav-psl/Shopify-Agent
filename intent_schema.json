@@ -61,7 +61,7 @@
 
     {
       "name": "warranty_claim",
-      "description": "User wants to file a warranty, return, or replacement claim on a purchased item.",
+      "description": "User wants to file a warranty, repair, or damage claim on a purchased item.",
       "actions": [
         { "name": "submit_claim", "requires_confirmation": true },
         { "name": "check_claim_status", "requires_confirmation": false }
@@ -70,8 +70,8 @@
       "optional_entities": ["product_name", "claim_type"],
       "example_utterances": [
         "This product arrived broken, I want a replacement",
-        "I'd like to return order #1042",
-        "What's the status of my warranty claim?"
+        "What's the status of my warranty claim?",
+        "I need to claim warranty on my order"
       ]
     },
 
@@ -92,7 +92,7 @@
 
     {
       "name": "policy_query",
-      "description": "User is asking about store policies rather than their own account or order.",
+      "description": "User is asking about store policies (returns, exchanges, refunds, shipping, privacy, terms).",
       "actions": [
         { "name": "answer_policy_question", "requires_confirmation": false }
       ],
@@ -101,6 +101,9 @@
       "policy_types": ["refund_policy", "shipping_policy", "privacy_policy", "warranty_policy", "terms_of_service"],
       "example_utterances": [
         "What's your refund policy?",
+        "How do I return or exchange an item?",
+        "What is your return policy?",
+        "Can I exchange for a different size?",
         "How long does shipping take?",
         "Do you sell my data to anyone?"
       ]

@@ -52,12 +52,13 @@ LANGUAGE_NAMES = {
 }
 
 
-def generate_reply(action_name: str, data: dict, language: str, original_message: str) -> str:
+def generate_reply(action_name: str, data: dict, language: str, original_message: str, custom_instructions: str = "") -> str:
     """
     action_name: e.g. "track_order", "search_products"
     data: whatever your Shopify data layer returned (dict/list/etc.)
     language: ISO 639-1 code from the classifier, e.g. "hi"
     original_message: the user's original message, for tone/context
+    custom_instructions: optional merchant-configured instructions from dashboard
     """
     language_name = LANGUAGE_NAMES.get(language, language)
 
@@ -65,12 +66,16 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
     if action_name in ("recommend_products", "search_products"):
         extra_guidance = " Briefly and warmly introduce the picks in 1-2 sentences. The products are displayed as interactive cards directly below your message, so you do not need to list every product detail or price manually."
 
+    instruction_clause = ""
+    if custom_instructions and custom_instructions.strip():
+        instruction_clause = f" Adhere strictly to the store's custom tone and guidelines: {custom_instructions.strip()}."
+
     system_prompt = (
         f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "
         f"({language}), regardless of what language this instruction is written in. "
         "Keep the reply short, warm, and easy to understand for a non-technical user. "
         "Use the structured data given to you as the source of truth — do not invent "
-        f"details that aren't in it.{extra_guidance} If the data indicates an error or empty result, "
+        f"details that aren't in it.{extra_guidance}{instruction_clause} If the data indicates an error or empty result, "
         "say so gently and suggest what the user could try next."
     )
 
@@ -104,8 +109,32 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
                 return f"I found {len(results)} item{'s' if len(results) != 1 else ''} for you:"
             return "Sorry, I couldn't find any products matching that description."
         if action_name in ("track_order",):
-            status = data.get("status") or "processing"
-            return f"Your order is currently {status}."
+            if data.get("error") == "not_found":
+                return f"Sorry, I couldn't find order #{data.get('order_number', '')}. Please check the order number and try again."
+            if data.get("error"):
+                return "I couldn't look up that order right now. Please check your order confirmation email or contact store support."
+            status = data.get("fulfillment_status") or data.get("status") or "processing"
+            tracking = data.get("tracking_url") or data.get("tracking_number")
+            num = data.get("order_number") or ""
+            num_str = f" #{num}" if num else ""
+            if tracking:
+                return f"Your order{num_str} is {status}. Tracking: {tracking}"
+            return f"Your order{num_str} is currently {status}."
+        if action_name in ("add_item",):
+            if data.get("error"):
+                return "Sorry, I couldn't find that item in stock to add to your cart."
+            item_name = data.get("added") or "item"
+            qty = data.get("quantity", 1)
+            return f"Added {qty}x {item_name} to your cart!"
+        if action_name in ("view_cart",):
+            return "Here is what's currently in your cart."
+        if action_name in ("clear_cart",):
+            return "Your cart has been cleared."
+        if action_name in ("answer_policy_question",):
+            body = data.get("body")
+            if body:
+                return body
+            return "For returns or exchanges, items can be returned within 7 days of delivery in original condition. Please reach out to support@dripire.com with your order number."
         return "Here are the details from our store."
 
 

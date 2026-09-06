@@ -134,7 +134,114 @@ def _match_recommend_fastpath(clean_msg: str) -> dict | None:
                 "language": "en",
             }
 
+_RETURN_EXCHANGE_FASTPATH = re.compile(
+    r"^(how (do|can) i (return|exchange)|"
+    r"i want to (return|exchange)|"
+    r"(return|exchange) (policy|an? item|products?)|"
+    r"returns? and exchanges?|"
+    r"return or exchange|"
+    r"returns?|"
+    r"exchanges?|"
+    r"can i exchange size|"
+    r"size exchange|"
+    r"refund policy|"
+    r"refunds?)$",
+    re.IGNORECASE,
+)
+
+
+def _match_policy_fastpath(clean_msg: str) -> dict | None:
+    if not clean_msg:
+        return None
+    text = clean_msg.lower()
+    if _RETURN_EXCHANGE_FASTPATH.match(clean_msg):
+        return {
+            "intent": "policy_query",
+            "action": "answer_policy_question",
+            "entities": {"policy_type": "refund_policy"},
+            "confidence": 0.98,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if any(k in text for k in ["return", "exchange", "refund"]):
+        if "warranty" not in text and "claim" not in text:
+            return {
+                "intent": "policy_query",
+                "action": "answer_policy_question",
+                "entities": {"policy_type": "refund_policy"},
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "language": "en",
+            }
     return None
+
+
+def _rule_based_fallback(clean_msg: str) -> dict:
+    text = clean_msg.lower()
+    if any(k in text for k in ["track", "order", "status", "shipment"]):
+        order_m = re.search(r"#?(\d{3,8})", text)
+        entities = {"order_number": order_m.group(1)} if order_m else {}
+        return {
+            "intent": "order_tracking",
+            "action": "track_order",
+            "entities": entities,
+            "confidence": 0.85,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if any(k in text for k in ["warranty", "claim"]):
+        return {
+            "intent": "warranty_claim",
+            "action": "submit_claim",
+            "entities": {"issue": clean_msg},
+            "confidence": 0.85,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if any(k in text for k in ["return", "exchange", "refund"]):
+        return {
+            "intent": "policy_query",
+            "action": "answer_policy_question",
+            "entities": {"policy_type": "refund_policy"},
+            "confidence": 0.9,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if any(k in text for k in ["recommend", "bestseller", "trending", "popular", "drop"]):
+        return {
+            "intent": "recommendations",
+            "action": "recommend_products",
+            "entities": {"recommendation_type": "bestseller"},
+            "confidence": 0.85,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if any(k in text for k in ["cart", "bag"]):
+        return {
+            "intent": "cart_management",
+            "action": "view_cart",
+            "entities": {},
+            "confidence": 0.85,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    if any(k in text for k in ["search", "find", "show", "shirt", "t-shirt", "tee"]):
+        return {
+            "intent": "product_search",
+            "action": "search_products",
+            "entities": {"query": clean_msg},
+            "confidence": 0.75,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+    return {
+        "intent": "fallback",
+        "action": "clarify",
+        "entities": {},
+        "confidence": 0.0,
+        "requires_confirmation": False,
+        "language": "en",
+    }
 
 
 def classify_intent(user_message: str, schema: dict | None = None) -> dict:
@@ -148,43 +255,28 @@ def classify_intent(user_message: str, schema: dict | None = None) -> dict:
     if fastpath_match:
         return fastpath_match
 
+    policy_match = _match_policy_fastpath(clean_msg)
+    if policy_match:
+        return policy_match
+
     system_prompt = build_system_prompt(schema)
     
-    # Before adding llm_selector and its create.chat.completions()
-    # response = _get_client().chat.completions.create(
-    #     model=MODEL,
-    #     response_format={"type": "json_object"},
-    #     messages=[
-    #         {"role": "system", "content": system_prompt},
-    #         {"role": "user", "content": user_message},
-    #     ],
-    #     temperature=0,
-    #     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    # )
-    response = llm_selector.create_chat_completion(
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
-    raw = _strip_thinking(response.choices[0].message.content)
-    # result = json.loads(raw)
-
     try:
+        response = llm_selector.create_chat_completion(
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        raw = _strip_thinking(response.choices[0].message.content)
         result = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as e:
-        print(f"intent_classifier: model returned unparseable content ({e!r}); raw={raw!r}")
-        return {
-            "intent": "fallback",
-            "action": "clarify",
-            "entities": {},
-            "confidence": 0.0,
-            "requires_confirmation": False,
-            "language": "en",
-        }
+    except Exception as e:
+        print(f"intent_classifier: LLM completion failed ({e!r}), using rule-based fallback")
+        return _rule_based_fallback(clean_msg)
+
     # Don't trust the model's own confidence/requires_confirmation blindly —
     # cross-check against the schema and fall back safely if anything looks off.
     intent_name = result.get("intent", "fallback")

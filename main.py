@@ -13,6 +13,7 @@ project, before starting the app.
 import os
 import re
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from nicegui import ui
@@ -20,10 +21,7 @@ from nicegui import ui
 import shopify_auth
 import webhooks
 import dashboard_nicegui  # noqa: F401 — importing this registers all @ui.page routes below
-import chatbot_widget  # NOTE: still needs migrating off SQLAlchemy — see below
-
-app = FastAPI(title="Shopify Chatbot Plugin")
-from fastapi.middleware.cors import CORSMiddleware
+import chatbot_widget
 
 app = FastAPI(title="Shopify Chatbot Plugin")
 
@@ -43,17 +41,14 @@ app.add_middleware(
     allow_credentials=False,
 )
 
+# Only enforce https_only cookies in production so local development over
+# http://localhost:8000 maintains session cookies without dropping them.
+is_prod = os.environ.get("ENVIRONMENT", "development").lower() == "production" or os.environ.get("HTTPS_ONLY", "false").lower() == "true"
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("SESSION_SECRET", "change-me-in-production"),
     same_site="lax",
-    https_only=True,
-)
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.environ.get("SESSION_SECRET", "change-me-in-production"),
-    same_site="lax",
-    https_only=True,
+    https_only=is_prod,
 )
 
 os.makedirs("static/uploads", exist_ok=True)

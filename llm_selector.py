@@ -44,29 +44,58 @@ PRIMARY_MODEL = os.environ.get("PRIMARY_LLM_MODEL", "gpt-4o-mini")
 
 
 def _load_fallback_providers() -> list[dict]:
-    raw = (os.environ.get("FALLBACK_LLM_APIKEY_ENDPOINT_MODEL") or "").strip()
-    if not raw:
-        print("[llm_selector] FALLBACK_LLM_APIKEY_ENDPOINT_MODEL not set — no fallback providers configured")
-        return []
-
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"[llm_selector] FALLBACK_LLM_APIKEY_ENDPOINT_MODEL is not valid JSON ({e}) — ignoring, no fallbacks")
-        return []
-
-    if not isinstance(parsed, list):
-        print("[llm_selector] FALLBACK_LLM_APIKEY_ENDPOINT_MODEL must be a JSON list — ignoring, no fallbacks")
-        return []
-
     providers = []
-    for i, item in enumerate(parsed):
-        if not isinstance(item, dict) or not all(k in item and item[k] for k in ("api_key", "base_url", "model")):
-            print(f"[llm_selector] fallback provider #{i} is missing api_key/base_url/model — skipped")
-            continue
-        providers.append(item)
+    raw = (os.environ.get("FALLBACK_LLM_APIKEY_ENDPOINT_MODEL") or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                for i, item in enumerate(parsed):
+                    if isinstance(item, dict) and all(k in item and item[k] for k in ("api_key", "base_url", "model")):
+                        providers.append(item)
+                    else:
+                        print(f"[llm_selector] fallback provider #{i} is missing api_key/base_url/model — skipped")
+        except Exception as e:
+            print(f"[llm_selector] Error parsing FALLBACK_LLM_APIKEY_ENDPOINT_MODEL: {e}")
 
-    print(f"[llm_selector] loaded {len(providers)} fallback provider(s)")
+    # Auto-detect secondary custom provider
+    sec_key = os.environ.get("SECONDARY_LLM_API_KEY")
+    sec_base = os.environ.get("SECONDARY_LLM_BASE_URL")
+    sec_model = os.environ.get("SECONDARY_LLM_MODEL", "gpt-4o-mini")
+    if sec_key and sec_base:
+        providers.append({"api_key": sec_key, "base_url": sec_base, "model": sec_model})
+
+    # Auto-detect Groq if key is provided and not already in providers
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if groq_key and not any("groq.com" in p.get("base_url", "") for p in providers):
+        providers.append({
+            "api_key": groq_key,
+            "base_url": "https://api.groq.com/openai/v1",
+            "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        })
+
+    # Auto-detect Gemini OpenAI-compatible endpoint
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key and not any("generativelanguage" in p.get("base_url", "") for p in providers):
+        providers.append({
+            "api_key": gemini_key,
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "model": os.environ.get("GEMINI_MODEL", "gemini-1.5-flash"),
+        })
+
+    # Auto-detect OpenAI if primary is something else (e.g. self-hosted/local/Groq)
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key and PRIMARY_BASE_URL and not any("api.openai.com" in p.get("base_url", "") for p in providers):
+        providers.append({
+            "api_key": openai_key,
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+        })
+
+    if not providers:
+        print("[llm_selector] No fallback providers configured (set FALLBACK_LLM_APIKEY_ENDPOINT_MODEL or GROQ_API_KEY)")
+    else:
+        print(f"[llm_selector] loaded {len(providers)} fallback provider(s)")
     return providers
 
 

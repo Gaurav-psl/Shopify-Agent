@@ -120,10 +120,10 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
         print(f"chatbot_widget: log_request failed: {e!r}")
 
 
-async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
+async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str, custom_instructions: str = "") -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities)
     data, widget_action = _split_widget_action(raw)
-    reply = generate_reply(action, data, language, original_message)
+    reply = generate_reply(action, data, language, original_message, custom_instructions=custom_instructions)
     out = {"status": "done", "reply": reply, "language": language, "intent": intent, "action": action}
     if widget_action:
         out["widget_action"] = widget_action
@@ -143,9 +143,12 @@ async def chat(req: ChatRequest):
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
 
-    cfg = repo.ensure_customization(store.id)  # cfg = repo.ensure_customization(store["$id"])
+    cfg = repo.ensure_customization(store.id)
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
+
+    custom_instructions = cfg.get("instructions") or ""
+    features = repo.ensure_features(store.id)
 
     _prune_pending()
     pending = PENDING.get(req.session_id)
@@ -154,14 +157,15 @@ async def chat(req: ChatRequest):
         text = message.lower().strip(" .!")
         if text in _AFFIRMATIVE:
             PENDING.pop(req.session_id, None)
-            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message)
+            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message, custom_instructions=custom_instructions)
             _log(req.shop, message, result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
             return result
         if text in _NEGATIVE:
             PENDING.pop(req.session_id, None)
-            cancel_reply = generate_reply("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message)
+            cancel_reply = generate_reply("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message, custom_instructions=custom_instructions)
             _log(req.shop, message, "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
             return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
+
     clean_text = message.lower().strip(" .!?,")
     _GREETING_WORDS = {
         "hi", "hello", "hey", "hey there", "hi there", "hello there", "good morning",
@@ -189,6 +193,20 @@ async def chat(req: ChatRequest):
     entities = classification["entities"]
     language = classification["language"]
 
+    # Check merchant dashboard feature toggles
+    FEATURE_MAPPING = {
+        "order_tracking": "track_orders",
+        "cart_management": "cart_editing",
+        "recommendations": "recommendations",
+        "product_search": "product_search",
+        "warranty_claim": "warranty",
+    }
+    feature_key = FEATURE_MAPPING.get(intent)
+    if feature_key and features.get(feature_key) is False:
+        disabled_reply = "This feature is currently disabled for this store. Please reach out to customer support for assistance."
+        _log(req.shop, message, "disabled", intent, action, entities, disabled_reply)
+        return {"status": "disabled", "reply": disabled_reply, "language": language}
+
     if classification["requires_confirmation"]:
         PENDING[req.session_id] = {
             "intent": intent, "action": action, "entities": entities,
@@ -198,13 +216,13 @@ async def chat(req: ChatRequest):
             action,
             {"pending_action": action, "details": entities,
              "instruction": "Ask the shopper to reply yes to confirm or no to cancel before this action is taken."},
-            language, message,
+            language, message, custom_instructions=custom_instructions,
         )
         _log(req.shop, message, "confirmation_required", intent, action, entities, confirm_reply)
         return {"status": "confirmation_required", "reply": confirm_reply, "language": language}
 
     try:
-        result = await _execute_and_reply(store, intent, action, entities, language, message)
+        result = await _execute_and_reply(store, intent, action, entities, language, message, custom_instructions=custom_instructions)
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
         return result
     except Exception as e:  # noqa: BLE001
@@ -223,16 +241,18 @@ async def confirm(req: ConfirmRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
+    custom_instructions = cfg.get("instructions") or ""
+
     pending = PENDING.pop(req.session_id, None)
     if not pending:
         return {"status": "expired", "reply": "That request has expired — please ask again."}
 
     if not req.confirmed:
-        cancel_reply = generate_reply("cancelled", {"message": "The shopper declined."}, pending["language"], "cancel")
+        cancel_reply = generate_reply("cancelled", {"message": "The shopper declined."}, pending["language"], "cancel", custom_instructions=custom_instructions)
         _log(req.shop, "confirmed=false", "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
         return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
-    result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed")
+    result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed", custom_instructions=custom_instructions)
     _log(req.shop, "confirmed=true", result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
     return result
 
@@ -243,6 +263,11 @@ async def widget_config(shop: str):
     if not store:
         return {"error": "unknown store"}
     cfg = repo.ensure_customization(store["$id"])
+    features = repo.ensure_features(store["$id"])
+    clean_features = {
+        k: v for k, v in features.items()
+        if not k.startswith("$") and k not in ("store",)
+    }
     return {
         "status": cfg.get("status", "active"),
         "agent_name": cfg.get("agent_name", "AI Assistant"),
@@ -250,6 +275,7 @@ async def widget_config(shop: str):
         "icon_type": cfg.get("icon_type", "preset"),
         "theme_color": cfg.get("theme_color", "#2b2b2b"),
         "custom_icon_url": cfg.get("custom_icon_url", ""),
+        "features": clean_features,
     }
 
 
@@ -431,6 +457,7 @@ WIDGET_JS = r"""
       }
       root.style.display = "";
       if (!cfg || cfg.error) return;
+      CFG.features = cfg.features || {};
       var brand = (cfg.agent_name || "DRIPIRE").toUpperCase();
       headerName.textContent = cfg.agent_name || "DRIPIRE";
       greetingBubble.innerHTML = "Welcome to <strong>" + brand + "</strong>! How can I assist you today?";
@@ -449,11 +476,13 @@ WIDGET_JS = r"""
     })
     .catch(function () { root.style.display = ""; /* fall back to defaults already in the markup */ });
 
+  var STATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
   var SESSION_ID = (function () {
     try {
-      var id = sessionStorage.getItem("chatSessionId");
+      var id = localStorage.getItem("chatSessionId_" + SHOP) || sessionStorage.getItem("chatSessionId");
       if (!id) {
         id = "sess_" + Math.random().toString(36).slice(2) + Date.now();
+        localStorage.setItem("chatSessionId_" + SHOP, id);
         sessionStorage.setItem("chatSessionId", id);
       }
       return id;
@@ -463,23 +492,24 @@ WIDGET_JS = r"""
   })();
 
   // --------------------------------------------------------------------
-  // Cross-page persistence: Shopify does a full page reload on nearly
-  // every navigation, so any in-memory chat state is normally lost.
-  // We mirror open/expanded state + the full message history to
-  // sessionStorage (scoped to this browser tab's session, same lifetime
-  // as SESSION_ID above) and replay it back into the DOM on load.
+  // Cross-page & multi-tab persistence: persists chat state across full
+  // page reloads and browser tabs for 24 hours via localStorage (with
+  // sessionStorage fallback). Replayed back into the DOM on page load.
   // --------------------------------------------------------------------
   var STATE_KEY = "aiChatWidgetState_" + SHOP;
   var chatHistory = [];
   function persistState() {
     try {
-      sessionStorage.setItem(STATE_KEY, JSON.stringify({
+      var payload = JSON.stringify({
         open: widget.classList.contains("open"),
         expanded: widget.classList.contains("expanded"),
         quickActionsShown: quickActionsRendered,
-        history: chatHistory
-      }));
-    } catch (e) { /* storage unavailable/full — chat still works, just won't persist */ }
+        history: chatHistory,
+        ts: Date.now()
+      });
+      localStorage.setItem(STATE_KEY, payload);
+      sessionStorage.setItem(STATE_KEY, payload);
+    } catch (e) { /* storage unavailable/full */ }
   }
 
   var ttsEnabled = false;
@@ -507,11 +537,16 @@ WIDGET_JS = r"""
   if (resetChat) {
     resetChat.addEventListener("click", function () {
       try {
+        localStorage.removeItem(STATE_KEY);
         sessionStorage.removeItem(STATE_KEY);
+        localStorage.removeItem("chatSessionId_" + SHOP);
         sessionStorage.removeItem("chatSessionId");
       } catch (e) {}
       SESSION_ID = "sess_" + Math.random().toString(36).slice(2) + Date.now();
-      try { sessionStorage.setItem("chatSessionId", SESSION_ID); } catch (e) {}
+      try {
+        localStorage.setItem("chatSessionId_" + SHOP, SESSION_ID);
+        sessionStorage.setItem("chatSessionId", SESSION_ID);
+      } catch (e) {}
       chatHistory = [];
       conversation.innerHTML = "";
       var brand = ((headerName && headerName.textContent) || "DRIPIRE").toUpperCase();
@@ -698,12 +733,25 @@ WIDGET_JS = r"""
   // embedded on the store's own page. The backend never touches carts
   // directly (see shopify_actions.py); it only tells us *what* to do.
   // --------------------------------------------------------------------
+  function dispatchShopifyCartEvents(cart) {
+    if (!cart) return;
+    try {
+      document.dispatchEvent(new CustomEvent("cart:updated", { bubbles: true, detail: { cart: cart } }));
+      document.dispatchEvent(new CustomEvent("cart:refresh", { bubbles: true, detail: { cart: cart } }));
+      document.dispatchEvent(new CustomEvent("cart:build", { bubbles: true, detail: { cart: cart } }));
+      if (window.Shopify && typeof window.Shopify.onCartUpdate === "function") {
+        window.Shopify.onCartUpdate(cart);
+      }
+    } catch (e) {}
+  }
+
   function refreshCartBadge() {
     fetch("/cart.js").then(function (r) { return r.json(); }).then(function (cart) {
       updateCartBadge(cart.item_count);
       if (cart.currency) {
         detectedCurrencySymbol = CURRENCY_MAP[cart.currency] || (cart.currency + " ");
       }
+      dispatchShopifyCartEvents(cart);
     }).catch(function () {});
   }
 
@@ -761,7 +809,7 @@ WIDGET_JS = r"""
   }
 
   function cartClear() {
-    fetch("/cart/clear.js", { method: "POST" }).then(function () { updateCartBadge(0); }).catch(function () {});
+    fetch("/cart/clear.js", { method: "POST" }).then(function () { updateCartBadge(0); refreshCartBadge(); }).catch(function () {});
   }
 
   function runWidgetAction(action) {
@@ -788,21 +836,44 @@ WIDGET_JS = r"""
     }
   }
 
-  var QUICK_ACTIONS = [
-    { icon: "\u2728", label: "Top recommendations", command: "What do you recommend?", featured: true },
-    { icon: "\uD83D\uDD0D", label: "Search products", command: "Show me products" },
-    { icon: "\uD83D\uDED2", label: "Add an item to cart", command: "Add a t-shirt to my cart" },
-    { icon: "\uD83C\uDFF7\uFE0F", label: "Filter by price", command: "Show me products under \u20B9800" },
-    { icon: "\uD83D\uDCE6", label: "Track my order", command: "Track my order #1001" },
-    { icon: "\uD83D\uDEE1\uFE0F", label: "Claim a warranty", command: "I want to claim a warranty for order #1001" }
-  ];
+  function getQuickActions() {
+    var f = CFG.features || {};
+    var isDripire = (SHOP && SHOP.toLowerCase().indexOf("dripire") !== -1) ||
+                    (headerName && headerName.textContent && headerName.textContent.toLowerCase().indexOf("dripire") !== -1);
+    var returnOrWarranty = isDripire
+      ? { icon: "\u21A9\uFE0F", label: "Return / Exchange", command: "How do I return or exchange an item?" }
+      : { icon: "\uD83D\uDEE1\uFE0F", label: "Claim a warranty", command: "Claim a warranty" };
+
+    var actions = [];
+    if (f.recommendations !== false) {
+      actions.push({ icon: "\u2728", label: "Top recommendations", command: "What do you recommend?", featured: true });
+    }
+    if (f.product_search !== false) {
+      actions.push({ icon: "\uD83D\uDD0D", label: "Search products", command: "Show me products" });
+    }
+    if (f.cart_editing !== false) {
+      actions.push({ icon: "\uD83D\uDED2", label: "Add an item to cart", command: "Add a t-shirt to my cart" });
+    }
+    if (f.product_filtering !== false) {
+      actions.push({ icon: "\uD83C\uDFF7\uFE0F", label: "Filter by price", command: "Show me products under \u20B9800" });
+    }
+    if (f.track_orders !== false) {
+      actions.push({ icon: "\uD83D\uDCE6", label: "Track my order", command: "Track my order #1001" });
+    }
+    var showReturnWarranty = isDripire ? (f.returns !== false) : (f.warranty !== false);
+    if (showReturnWarranty) {
+      actions.push(returnOrWarranty);
+    }
+    return actions;
+  }
+
   function renderQuickActions() {
     if (quickActionsRendered) return;
     quickActionsRendered = true;
     var row = document.createElement("div");
     row.className = "quick-actions";
     conversation.appendChild(row);
-    QUICK_ACTIONS.forEach(function (action, i) {
+    getQuickActions().forEach(function (action, i) {
       var btn = document.createElement("button");
       btn.className = "quick-action-btn" + (action.featured ? " featured" : "");
       btn.innerHTML = '<span style="font-size:12px;">' + action.icon + '</span> ' + action.label;
@@ -814,6 +885,12 @@ WIDGET_JS = r"""
 
   function getLoadingText(query) {
     var q = (query || "").toLowerCase();
+    if (/warranty|claim/i.test(q)) {
+      return "Checking warranty claim status\u2026";
+    }
+    if (/return|exchange|refund|replace/i.test(q)) {
+      return "Checking return & exchange policy\u2026";
+    }
     if (/recommend|suggest|trend|popular|best|top|drop/i.test(q)) {
       return "Finding best streetwear drops\u2026";
     }
@@ -826,7 +903,7 @@ WIDGET_JS = r"""
     if (/price|under|cheap|deal|discount|sale|cost/i.test(q)) {
       return "Checking prices & styles\u2026";
     }
-    if (/size|fit|warranty|return|exchange|policy|shipping/i.test(q)) {
+    if (/size|fit|policy|shipping/i.test(q)) {
       return "Checking store details\u2026";
     }
     var brand = ((headerName && headerName.textContent) || "DRIPIRE");
@@ -876,8 +953,16 @@ WIDGET_JS = r"""
   (function restoreState() {
     var saved = null;
     try {
-      var raw = sessionStorage.getItem(STATE_KEY);
-      if (raw) saved = JSON.parse(raw);
+      var raw = localStorage.getItem(STATE_KEY) || sessionStorage.getItem(STATE_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (!parsed.ts || (Date.now() - parsed.ts < STATE_TTL_MS)) {
+          saved = parsed;
+        } else {
+          localStorage.removeItem(STATE_KEY);
+          sessionStorage.removeItem(STATE_KEY);
+        }
+      }
     } catch (e) { saved = null; }
     if (!saved) return;
 
