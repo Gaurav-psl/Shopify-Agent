@@ -24,8 +24,7 @@ _client = None
 # <think>...</think> before the actual answer when "thinking mode" is on.
 # Strip it out so only the final, user-facing reply ever reaches the widget.
 #  primary model : Qwen/Qwen3-8B-AWQ 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-
+_THINK_RE = re.compile(r"<(?:think|thought)>.*?</(?:think|thought)>", re.DOTALL | re.IGNORECASE)    # regular expression to handle text in think tag as well as thought tag
 
 def _strip_thinking(text: str) -> str:
     if not text:
