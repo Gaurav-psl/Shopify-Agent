@@ -127,29 +127,4 @@ class ForceCookieSameSiteNone:
 
 app.add_middleware(ForceCookieSameSiteNone)
 
-import json
-import os 
 
-@app.get("/debug/fallback-env-check")
-async def debug_fallback_env_check():
-    raw = os.environ.get("FALLBACK_LLM_APIKEY_ENDPOINT_MODEL", "")
-    result = {
-        "raw_repr": repr(raw),          # shows hidden characters like \n explicitly
-        "length": len(raw),
-        "starts_with": raw[:20],
-        "ends_with": raw[-20:],
-    }
-    try:
-        parsed = json.loads(raw)
-        result["json_parse"] = "OK"
-        result["parsed_count"] = len(parsed) if isinstance(parsed, list) else "not a list"
-        if isinstance(parsed, list):
-            result["models_found"] = [item.get("model", "?") for item in parsed if isinstance(item, dict)]
-    except json.JSONDecodeError as e:
-        result["json_parse"] = "FAILED"
-        result["error"] = str(e)
-        result["error_position"] = {"line": e.lineno, "column": e.colno, "char_index": e.pos}
-        if 0 <= e.pos < len(raw):
-            result["character_at_error"] = repr(raw[e.pos])
-
-    return result
