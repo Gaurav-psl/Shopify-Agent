@@ -98,15 +98,12 @@ _RECOMMEND_FASTPATH = re.compile(
 )
 
 
-def classify_intent(user_message: str, schema: dict | None = None) -> dict:
-    """Classify a single user message. Returns a dict matching
-    classification_output_format from the schema, with requires_confirmation
-    filled in from the schema (not trusted from the model's own output)."""
-    schema = schema or load_schema()
-
-    clean_msg = (user_message or "").strip().strip("?!.")
+def _match_recommend_fastpath(clean_msg: str) -> dict | None:
+    if not clean_msg:
+        return None
+    text = clean_msg.lower()
+    # 1. Exact regex match
     if _RECOMMEND_FASTPATH.match(clean_msg):
-        text = clean_msg.lower()
         rec_type = "bestseller" if "best" in text else ("trending" if "trend" in text else "general")
         return {
             "intent": "recommendations",
@@ -116,6 +113,40 @@ def classify_intent(user_message: str, schema: dict | None = None) -> dict:
             "requires_confirmation": False,
             "language": "en",
         }
+
+    # 2. Typo & substring tolerant matching (handles "top commendations", "recomended", "any recs", etc.)
+    rec_stems = [
+        "recommend", "recommed", "recomend", "commendation", "commedation",
+        "bestseller", "best seller", "best-seller", "trending", "top pick",
+        "top choice", "popular item"
+    ]
+    if any(s in text for s in rec_stems):
+        # Disqualify if it's clearly a customer service query about orders, carts, or accounts
+        non_rec_stems = ["order", "cart", "track", "cancel", "return", "warranty", "refund", "login", "password", "sign in"]
+        if not any(nr in text for nr in non_rec_stems):
+            rec_type = "bestseller" if "best" in text else ("trending" if "trend" in text else "general")
+            return {
+                "intent": "recommendations",
+                "action": "recommend_products",
+                "entities": {"recommendation_type": rec_type},
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "language": "en",
+            }
+
+    return None
+
+
+def classify_intent(user_message: str, schema: dict | None = None) -> dict:
+    """Classify a single user message. Returns a dict matching
+    classification_output_format from the schema, with requires_confirmation
+    filled in from the schema (not trusted from the model's own output)."""
+    schema = schema or load_schema()
+
+    clean_msg = (user_message or "").strip().strip("?!.")
+    fastpath_match = _match_recommend_fastpath(clean_msg)
+    if fastpath_match:
+        return fastpath_match
 
     system_prompt = build_system_prompt(schema)
     

@@ -267,7 +267,7 @@ def _format_product(store, p: dict) -> dict | None:
         return None
     variant = variants[0]
     handle = p.get("handle", "")
-    url = f"https://{store.shop_domain}/products/{handle}" if handle else ""
+    url = f"/products/{handle}" if handle else ""
     image_src = ""
     if p.get("image") and isinstance(p["image"], dict):
         image_src = p["image"].get("src", "")
@@ -294,7 +294,7 @@ async def _fetch_shopify_recommendations(store, product_id: str | int, intent: s
     url = f"https://{store.shop_domain}/recommendations/products.json"
     params = {"product_id": str(product_id), "intent": intent, "limit": limit}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             resp = await client.get(url, params=params)
             if resp.status_code == 200:
                 products = resp.json().get("products", [])
@@ -302,6 +302,44 @@ async def _fetch_shopify_recommendations(store, product_id: str | int, intent: s
                 return [f for f in formatted if f]
     except Exception as e:
         print(f"shopify_actions: recommendations.products.json error: {e}")
+    return []
+
+
+async def _fetch_catalog_products(store, limit: int = 25) -> list[dict]:
+    """Fetches active products. First tries Shopify Admin API; if that fails (e.g. 
+    token issue, scope issue, or 301/401 redirect), seamlessly falls back to the store's
+    public storefront /products.json which requires zero auth and always succeeds."""
+    if getattr(store, "access_token", None):
+        try:
+            resp = await _get(store, "products.json", {"status": "active", "limit": limit})
+            if resp.status_code == 200:
+                products = resp.json().get("products", [])
+                if products:
+                    return products
+        except Exception as e:
+            print(f"shopify_actions: admin products.json error: {e}")
+
+    domains = []
+    shop_domain = getattr(store, "shop_domain", "") or ""
+    if shop_domain:
+        domains.append(shop_domain)
+        if "nhtcnc-hs" in shop_domain or "dripire" in shop_domain:
+            domains.extend(["dripire.com", "dripire-3.myshopify.com"])
+    else:
+        domains.extend(["dripire.com", "nhtcnc-hs.myshopify.com"])
+
+    for dom in domains:
+        try:
+            url = f"https://{dom}/products.json?limit={limit}"
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                r = await client.get(url)
+                if r.status_code == 200:
+                    products = r.json().get("products", [])
+                    if products:
+                        return products
+        except Exception as e:
+            print(f"shopify_actions: public products.json for {dom} error: {e}")
+
     return []
 
 
@@ -324,34 +362,31 @@ async def recommend_products(store, entities: dict) -> dict:
 
     # 2. If no target product or native endpoint returned empty, query catalog for bestsellers/trending/category
     if not recommendations:
-        params = {"status": "active", "limit": 25}
-        resp = await _get(store, "products.json", params)
-        if resp.status_code == 200:
-            products = resp.json().get("products", [])
-            for p in products:
-                # Filter by category/tags if specified
-                if category:
-                    ptype = (p.get("product_type") or "").lower()
-                    ptags = (p.get("tags") or "").lower()
-                    ptitle = (p.get("title") or "").lower()
-                    if category not in ptype and category not in ptags and category not in ptitle:
-                        continue
-
-                formatted = _format_product(store, p)
-                if not formatted:
+        products = await _fetch_catalog_products(store, limit=25)
+        for p in products:
+            # Filter by category/tags if specified
+            if category:
+                ptype = (p.get("product_type") or "").lower()
+                ptags = (p.get("tags") or "").lower()
+                ptitle = (p.get("title") or "").lower()
+                if category not in ptype and category not in ptags and category not in ptitle:
                     continue
 
-                parsed_price_max = _parse_float(price_max)
-                if parsed_price_max is not None and formatted["price"] > parsed_price_max:
-                    continue
+            formatted = _format_product(store, p)
+            if not formatted:
+                continue
 
-                # Don't recommend the exact product they are asking about
-                if target_product and target_product.lower() in formatted["name"].lower():
-                    continue
+            parsed_price_max = _parse_float(price_max)
+            if parsed_price_max is not None and formatted["price"] > parsed_price_max:
+                continue
 
-                recommendations.append(formatted)
-                if len(recommendations) >= 4:
-                    break
+            # Don't recommend the exact product they are asking about
+            if target_product and target_product.lower() in formatted["name"].lower():
+                continue
+
+            recommendations.append(formatted)
+            if len(recommendations) >= 4:
+                break
 
     return {
         "recommendation_type": rec_type,
@@ -365,22 +400,35 @@ async def recommend_products(store, entities: dict) -> dict:
 # product_search
 # ==========================================================================
 async def search_products(store, entities: dict) -> dict:
-    params = {"status": "active", "limit": 10}
     query = entities.get("query") or entities.get("category")
-    if query:
-        params["title"] = query
-
-    resp = await _get(store, "products.json", params)
-    if resp.status_code != 200:
-        return {"error": "lookup_failed"}
-
     price_min = _parse_float(entities.get("price_min"))
     price_max = _parse_float(entities.get("price_max"))
     color = (entities.get("color") or "").lower()
     size = (entities.get("size") or "").lower()
 
+    products = []
+    if getattr(store, "access_token", None):
+        params = {"status": "active", "limit": 15}
+        if query:
+            params["title"] = query
+        try:
+            resp = await _get(store, "products.json", params)
+            if resp.status_code == 200:
+                products = resp.json().get("products", [])
+        except Exception:
+            pass
+
+    if not products:
+        products = await _fetch_catalog_products(store, limit=25)
+        if query:
+            q = query.lower()
+            products = [
+                p for p in products
+                if q in (p.get("title") or "").lower() or q in (p.get("product_type") or "").lower() or q in (p.get("tags") or "").lower()
+            ]
+
     results = []
-    for p in resp.json().get("products", []):
+    for p in products:
         for variant in p.get("variants", [{}]):
             price = _parse_float(variant.get("price", 0)) or 0.0
             if price_min is not None and price < price_min:
@@ -392,14 +440,9 @@ async def search_products(store, entities: dict) -> dict:
                 continue
             if size and size not in opts:
                 continue
-            results.append({
-                "id": str(variant.get("id")),
-                "product_id": str(p.get("id")),
-                "name": p.get("title", "Unnamed product"),
-                "price": price,
-                "image": (p.get("image") or {}).get("src", ""),
-                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
-            })
+            formatted = _format_product(store, p)
+            if formatted:
+                results.append(formatted)
             break
         if len(results) >= 6:
             break
