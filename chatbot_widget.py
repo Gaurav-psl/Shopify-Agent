@@ -287,7 +287,7 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .widget.expanded { width:min(420px, calc(100vw - 24px)); max-height:min(640px, calc(100vh - 60px)); }",
     "#ai-chat-widget-root .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }",
     "#ai-chat-widget-root .avatar { width:30px; height:30px; border-radius:50%; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:10.5px; background-size:cover; background-position:center; }",
-    "#ai-chat-widget-root .header h1 { margin:0; font-size:13.5px; font-weight:700; color:#1a1a1a; }",
+    "#ai-chat-widget-root .header h1 { margin:0; font-size:13.5px; font-weight:700; color:#1a1a1a; text-transform:uppercase; letter-spacing:0.5px; }",
     "#ai-chat-widget-root .header-right { margin-left:auto; display:flex; align-items:center; gap:6px; }",
     "#ai-chat-widget-root .icon-btn { position:relative; width:26px; height:26px; border-radius:50%; background:#f5f5f5; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; }",
     "#ai-chat-widget-root .icon-btn svg { width:13px; height:13px; stroke:#444; }",
