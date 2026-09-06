@@ -325,7 +325,11 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:14px; padding:10px 13px; font-size:11.5px; line-height:1.48; width:fit-content; max-width:90%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; flex-shrink:0; }",
     "#ai-chat-widget-root .bubble.bot { background:#ffffff !important; border:1px solid rgba(0,0,0,.06) !important; color:#1e293b; box-shadow:0 2px 8px rgba(0,0,0,.04); border-radius:14px 14px 14px 4px; align-self:flex-start; }",
     "#ai-chat-widget-root .bubble.user { background:#111317 !important; color:#ffffff; align-self:flex-end; border-radius:14px 14px 4px 14px; box-shadow:0 3px 10px rgba(17,19,23,.18); font-weight:500; }",
-    "#ai-chat-widget-root .bubble.typing { color:#999; font-style:italic; }",
+    "#ai-chat-widget-root .bubble.shimmer-ai { background:#ffffff !important; align-self:flex-start; border-radius:14px 14px 14px 4px; padding:9px 13px; display:inline-flex !important; align-items:center; gap:8px; box-shadow:0 3px 12px rgba(212,175,55,.15), 0 1px 3px rgba(0,0,0,.05); border:1px solid rgba(212,175,55,.35) !important; }",
+    "#ai-chat-widget-root .shimmer-icon { font-size:12px; color:#d4af37; animation:aiSpinGlow 2s infinite ease-in-out; display:inline-block; line-height:1; }",
+    "@keyframes aiSpinGlow { 0%, 100% { transform:scale(1) rotate(0deg); opacity:.85; } 50% { transform:scale(1.25) rotate(15deg); opacity:1; filter:drop-shadow(0 0 4px #e5c158); } }",
+    "#ai-chat-widget-root .shimmer-text { font-size:11.5px; font-weight:600; background:linear-gradient(90deg, #1e293b 0%, #b8860b 45%, #e5c158 55%, #1e293b 100%); background-size:200% 100%; -webkit-background-clip:text; -webkit-text-fill-color:transparent; animation:aiShimmerPass 2s infinite linear; }",
+    "@keyframes aiShimmerPass { 0% { background-position:100% 0; } 100% { background-position:-100% 0; } }",
     "#ai-chat-widget-root #greetingBubble { font-size:11.5px; font-weight:500; line-height:1.48; }",
     "#ai-chat-widget-root .quick-actions { display:flex; flex-wrap:wrap; gap:6px; align-self:flex-start; max-width:100%; margin-top:2px; margin-bottom:4px; flex-shrink:0; }",
     "#ai-chat-widget-root .quick-action-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 11px; border-radius:999px; font-size:11px; font-weight:600; color:#1e293b; background:rgba(255,255,255,.95); border:1px solid rgba(0,0,0,.09); box-shadow:0 1px 4px rgba(0,0,0,.04); cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .22s ease, transform .22s ease, background .15s ease, color .15s ease; white-space:nowrap; }",
@@ -658,16 +662,16 @@ WIDGET_JS = r"""
         persistState();
         row.remove();
         addBubble(opt.label, "user");
-        var typingEl = addBubble("typing\u2026", "bot typing");
+        var loadingEl = showLoading(opt.label);
         fetch(CFG.confirmEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed })
         })
           .then(function (res) { return res.json(); })
-          .then(function (data) { typingEl.remove(); handleChatResponse(data); })
+          .then(function (data) { loadingEl.remove(); handleChatResponse(data); })
           .catch(function () {
-            typingEl.remove();
+            loadingEl.remove();
             addBubble("Sorry, I could not reach the server. Please try again.", "bot");
           });
       });
@@ -808,13 +812,44 @@ WIDGET_JS = r"""
     });
   }
 
+  function getLoadingText(query) {
+    var q = (query || "").toLowerCase();
+    if (/recommend|suggest|trend|popular|best|top|drop/i.test(q)) {
+      return "Finding best streetwear drops\u2026";
+    }
+    if (/cart|bag|add to cart|buy|checkout/i.test(q)) {
+      return "Checking your bag\u2026";
+    }
+    if (/track|order|status|where is my/i.test(q)) {
+      return "Looking up your order details\u2026";
+    }
+    if (/price|under|cheap|deal|discount|sale|cost/i.test(q)) {
+      return "Checking prices & styles\u2026";
+    }
+    if (/size|fit|warranty|return|exchange|policy|shipping/i.test(q)) {
+      return "Checking store details\u2026";
+    }
+    var brand = ((headerName && headerName.textContent) || "DRIPIRE");
+    return brand + " AI is thinking\u2026";
+  }
+
+  function showLoading(query) {
+    var text = getLoadingText(query);
+    var el = document.createElement("div");
+    el.className = "bubble bot shimmer-ai";
+    el.innerHTML = '<span class="shimmer-icon">\u2726</span><span class="shimmer-text">' + text + '</span>';
+    conversation.appendChild(el);
+    autoResizeConversation();
+    return el;
+  }
+
   function sendMessage(text) {
     text = (text || "").trim();
     if (!text) return;
     addBubble(text, "user");
     input.value = "";
     micBtn.classList.remove("has-text");
-    var typingEl = addBubble("typing\u2026", "bot typing");
+    var loadingEl = showLoading(text);
 
     fetch(CFG.chatEndpoint, {
       method: "POST",
@@ -823,11 +858,11 @@ WIDGET_JS = r"""
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
-        typingEl.remove();
+        loadingEl.remove();
         handleChatResponse(data);
       })
       .catch(function () {
-        typingEl.remove();
+        loadingEl.remove();
         addBubble("Sorry, I could not reach the server. Please try again.", "bot");
       });
   }
