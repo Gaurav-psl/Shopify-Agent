@@ -14,11 +14,12 @@ Requires:
 import os
 import json
 import re
+import llm_selector
 from pathlib import Path
 from openai import OpenAI
 
 SCHEMA_PATH = Path(__file__).parent / "intent_schema.json"
-MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
+# MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
 
 _client = None
 
@@ -33,17 +34,6 @@ def _strip_thinking(text: str) -> str:
     if not text:
         return ""
     return _THINK_RE.sub("", text).strip()
-
-
-def _get_client():
-    """Create the OpenAI client on first use, not at import time. This means
-    a missing/bad OPENAI_API_KEY only breaks /chat when it's actually
-    called — it can never take down OAuth or any other route on startup."""
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"),
-                        base_url=os.environ.get("OPENAI_BASE_URL") )
-    return _client
 
 
 def load_schema() -> dict:
@@ -98,9 +88,19 @@ def classify_intent(user_message: str, schema: dict | None = None) -> dict:
     filled in from the schema (not trusted from the model's own output)."""
     schema = schema or load_schema()
     system_prompt = build_system_prompt(schema)
-
-    response = _get_client().chat.completions.create(
-        model=MODEL,
+    
+    # Before adding llm_selector and its create.chat.completions()
+    # response = _get_client().chat.completions.create(
+    #     model=MODEL,
+    #     response_format={"type": "json_object"},
+    #     messages=[
+    #         {"role": "system", "content": system_prompt},
+    #         {"role": "user", "content": user_message},
+    #     ],
+    #     temperature=0,
+    #     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    # )
+    response = llm_selector.create_chat_completion(
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
@@ -109,7 +109,6 @@ def classify_intent(user_message: str, schema: dict | None = None) -> dict:
         temperature=0,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
-
     raw = _strip_thinking(response.choices[0].message.content)
     result = json.loads(raw)
 
