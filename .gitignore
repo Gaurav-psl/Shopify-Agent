@@ -19,3 +19,4 @@ static/uploads/
 # Local previews & scratch
 preview_*.html
 *.png
+scratch/

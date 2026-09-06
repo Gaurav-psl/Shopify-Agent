@@ -299,7 +299,7 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none; }",
     "#ai-chat-widget-root .chat-fab.open .icon-close { display:block; }",
     "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none; }",
-    "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(300px, calc(100vw - 24px)); max-height:min(440px, calc(100vh - 100px)); background:rgba(255,255,255,.72); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); border:1.5px solid rgba(0,0,0,.12); border-radius:16px; padding:14px; box-shadow:0 12px 28px rgba(0,0,0,.14); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease, width .25s ease, max-height .25s ease; z-index:2147483000; display:flex; flex-direction:column; }",
+    "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(320px, calc(100vw - 24px)); max-height:min(520px, calc(100vh - 80px)); background:rgba(255,255,255,.88); backdrop-filter:blur(24px) saturate(180%); -webkit-backdrop-filter:blur(24px) saturate(180%); border:1.5px solid rgba(255,255,255,.95); border-radius:20px; padding:15px; box-shadow:0 24px 56px rgba(0,0,0,.35), 0 8px 20px rgba(0,0,0,.15); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease, width .25s ease, max-height .25s ease; z-index:2147483000; display:flex; flex-direction:column; }",
     "#ai-chat-widget-root .widget.open { transform:scale(1) translateY(0); opacity:1; pointer-events:auto; }",
     "#ai-chat-widget-root .widget.expanded { width:min(420px, calc(100vw - 24px)); max-height:min(640px, calc(100vh - 60px)); }",
     "#ai-chat-widget-root .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }",
@@ -322,18 +322,19 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb:hover { background:rgba(43,43,43,.65) !important; }",
     "#ai-chat-widget-root .conversation::-webkit-scrollbar-button, #ai-chat-widget-root .conversation::-webkit-scrollbar-button:single-button { display:none !important; width:0 !important; height:0 !important; }",
     "#ai-chat-widget-root .conversation::-webkit-scrollbar-corner { background:transparent !important; }",
+    "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:14px; padding:10px 13px; font-size:11.5px; line-height:1.48; width:fit-content; max-width:90%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; flex-shrink:0; }",
+    "#ai-chat-widget-root .bubble.bot { background:#ffffff !important; border:1px solid rgba(0,0,0,.06) !important; color:#1e293b; box-shadow:0 2px 8px rgba(0,0,0,.04); border-radius:14px 14px 14px 4px; align-self:flex-start; }",
+    "#ai-chat-widget-root .bubble.user { background:#111317 !important; color:#ffffff; align-self:flex-end; border-radius:14px 14px 4px 14px; box-shadow:0 3px 10px rgba(17,19,23,.18); font-weight:500; }",
+    "#ai-chat-widget-root .bubble.typing { color:#999; font-style:italic; }",
+    "#ai-chat-widget-root #greetingBubble { font-size:11.5px; font-weight:500; line-height:1.48; }",
+    "#ai-chat-widget-root .quick-actions { display:flex; flex-wrap:wrap; gap:6px; align-self:flex-start; max-width:100%; margin-top:2px; margin-bottom:4px; flex-shrink:0; }",
+    "#ai-chat-widget-root .quick-action-btn { display:inline-flex; align-items:center; gap:5px; padding:6px 11px; border-radius:999px; font-size:11px; font-weight:600; color:#1e293b; background:rgba(255,255,255,.95); border:1px solid rgba(0,0,0,.09); box-shadow:0 1px 4px rgba(0,0,0,.04); cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .22s ease, transform .22s ease, background .15s ease, color .15s ease; white-space:nowrap; }",
+    "#ai-chat-widget-root .quick-action-btn.show { opacity:1; transform:translateY(0); }",
+    "#ai-chat-widget-root .quick-action-btn:hover { background:#111317; color:#fff; border-color:#111317; transform:translateY(-1px); box-shadow:0 3px 8px rgba(0,0,0,.12); }",
+    "#ai-chat-widget-root .quick-action-btn.featured { background:linear-gradient(135deg, rgba(232,200,104,.2) 0%, rgba(255,255,255,.95) 100%); border:1px solid rgba(212,175,55,.45); color:#855f10; }",
+    "#ai-chat-widget-root .quick-action-btn.featured:hover { background:#111317; color:#fff; border-color:#111317; }",
     "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 6px; align-self:flex-start; max-width:100%; flex-shrink:0; scrollbar-width:none !important; -ms-overflow-style:none !important; }",
     "#ai-chat-widget-root .product-row::-webkit-scrollbar { display:none !important; width:0 !important; height:0 !important; background:transparent !important; }",
-    "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:12px; padding:9px 11px; font-size:11px; line-height:1.45; width:fit-content; max-width:92%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; flex-shrink:0; }",
-    "#ai-chat-widget-root .bubble.bot { background:rgba(255,255,255,.75) !important; border:1px solid rgba(236,236,236,.8); color:#2a2a2a; box-shadow:0 2px 8px rgba(0,0,0,.05); align-self:flex-start; }",
-    "#ai-chat-widget-root .bubble.user { background:#2b2b2b !important; color:#fff; align-self:flex-end; }",
-    "#ai-chat-widget-root .bubble.typing { color:#999; font-style:italic; }",
-    "#ai-chat-widget-root #greetingBubble { font-size:14px; font-weight:600; line-height:1.5; }",
-    "#ai-chat-widget-root .quick-actions { display:flex; flex-direction:column; gap:6px; align-self:flex-start; max-width:92%; flex-shrink:0; }",
-    "#ai-chat-widget-root .quick-action-btn { border:1px solid #e2e2e2; background:#fafafa; color:#2b2b2b; font-size:10.5px; font-weight:600; padding:5px 8px; border-radius:999px; text-align:left; cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .28s ease, transform .28s ease, background .15s ease; }",
-    "#ai-chat-widget-root .quick-action-btn.show { opacity:1; transform:translateY(0); }",
-    "#ai-chat-widget-root .quick-action-btn:hover { background:#f0f0f0; }",
-    "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; align-self:flex-start; max-width:100%; flex-shrink:0; }",
     "#ai-chat-widget-root .product-card { flex:0 0 110px; width:110px; border:1px solid #ececec; border-radius:10px; padding:6px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); display:flex; flex-direction:column; gap:4px; cursor:pointer; transition:box-shadow .15s ease, transform .15s ease; flex-shrink:0; box-sizing:border-box; }",
     "#ai-chat-widget-root .product-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateY(-1px); }",
     "#ai-chat-widget-root .product-card img { width:100%; height:70px; object-fit:cover; border-radius:6px; background:#f2f2f2; flex-shrink:0; }",
@@ -346,12 +347,13 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .confirm-btn:hover:not(:disabled) { background:#2b2b2b; color:#fff; border-color:#2b2b2b; }",
     "#ai-chat-widget-root .confirm-btn:active { transform:scale(.96); }",
     "#ai-chat-widget-root .confirm-btn:disabled { opacity:.5; cursor:default; }",
-    "#ai-chat-widget-root .input-row { position:relative;margin-top:15px; }",
-    "#ai-chat-widget-root .input-row input { width:100%; padding:15px 52px 15px 16px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:13px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
-    "#ai-chat-widget-root .mic-btn { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border-radius:50%; background:#2b2b2b; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease, box-shadow .08s ease, transform .08s ease; }",
+    "#ai-chat-widget-root .input-row { position:relative; margin-top:10px; flex-shrink:0; }",
+    "#ai-chat-widget-root .input-row input { width:100%; padding:13px 48px 13px 15px; border-radius:999px; border:1.5px solid rgba(0,0,0,.08); background:#ffffff; font-size:12.5px; color:#0f172a; outline:none; box-shadow:0 3px 10px rgba(0,0,0,.04); }",
+    "#ai-chat-widget-root .input-row input:focus { border-color:#111317; box-shadow:0 3px 14px rgba(0,0,0,.09); }",
+    "#ai-chat-widget-root .mic-btn { position:absolute; right:5px; top:50%; transform:translateY(-50%); width:34px; height:34px; border-radius:50%; background:#111317; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s ease, box-shadow .08s ease, transform .08s ease; }",
     "#ai-chat-widget-root .mic-btn.listening { background:#d64545; }",
     "#ai-chat-widget-root .mic-btn.speaking { box-shadow:0 0 0 calc(4px + var(--level,0)*12px) rgba(214,69,69,calc(.15 + var(--level,0)*.35)), 0 0 calc(6px + var(--level,0)*18px) calc(2px + var(--level,0)*6px) rgba(214,69,69,calc(.4 + var(--level,0)*.5)); transform:translateY(-50%) scale(calc(1 + var(--level,0)*.12)); }",
-    "#ai-chat-widget-root .mic-btn svg { width:17px; height:17px; stroke:#fff; }",
+    "#ai-chat-widget-root .mic-btn svg { width:15px; height:15px; stroke:#fff; }",
     "#ai-chat-widget-root .mic-btn .icon-send-inner { display:none; }",
     "#ai-chat-widget-root .mic-btn.has-text .icon-mic-inner { display:none; }",
     "#ai-chat-widget-root .mic-btn.has-text .icon-send-inner { display:block; }",
@@ -388,10 +390,10 @@ WIDGET_JS = r"""
         "</div>" +
       "</div>" +
       '<div class="conversation" id="conversation">' +
-        '<div class="bubble bot" id="greetingBubble">Hi! How can I help you today?</div>' +
+        '<div class="bubble bot" id="greetingBubble">Welcome to <strong>DRIPIRE</strong>! How can I assist you today?</div>' +
       "</div>" +
       '<div class="input-row">' +
-        '<input type="text" id="chatInput" placeholder="Search, add to cart, ask a question....." />' +
+        '<input type="text" id="chatInput" placeholder="Ask DRIPIRE anything.." />' +
         '<button class="mic-btn" id="micBtn" aria-label="Voice input">' +
           '<svg class="icon-mic-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
           '<svg class="icon-send-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' +
@@ -425,8 +427,9 @@ WIDGET_JS = r"""
       }
       root.style.display = "";
       if (!cfg || cfg.error) return;
-      headerName.textContent = cfg.agent_name || "AI Assistant";
-      greetingBubble.textContent = cfg.agent_title || "Hi! How can I help you today?";
+      var brand = (cfg.agent_name || "DRIPIRE").toUpperCase();
+      headerName.textContent = cfg.agent_name || "DRIPIRE";
+      greetingBubble.innerHTML = "Welcome to <strong>" + brand + "</strong>! How can I assist you today?";
 
       if (cfg.icon_type === "custom" && cfg.custom_icon_url) {
         var url = cfg.custom_icon_url.indexOf("http") === 0 ? cfg.custom_icon_url : ORIGIN + cfg.custom_icon_url;
@@ -507,7 +510,8 @@ WIDGET_JS = r"""
       try { sessionStorage.setItem("chatSessionId", SESSION_ID); } catch (e) {}
       chatHistory = [];
       conversation.innerHTML = "";
-      addBubble((greetingBubble && greetingBubble.textContent) ? greetingBubble.textContent : "Hi! How can I help you today?", "bot", { record: false, silent: true });
+      var brand = ((headerName && headerName.textContent) || "DRIPIRE").toUpperCase();
+      addBubble("Welcome to <strong>" + brand + "</strong>! How can I assist you today?", "bot", { record: false, silent: true, html: true });
       quickActionsRendered = false;
       renderQuickActions();
       persistState();
@@ -530,12 +534,13 @@ WIDGET_JS = r"""
     opts = opts || {};
     var el = document.createElement("div");
     el.className = "bubble " + who;
-    el.textContent = text;
+    if (opts.html) el.innerHTML = text;
+    else el.textContent = text;
     conversation.appendChild(el);
     autoResizeConversation();
     if (who.indexOf("typing") === -1) {
-      if (opts.record !== false) { chatHistory.push({ type: "bubble", text: text, who: who }); persistState(); }
-      if (who === "bot" && !opts.silent) speak(text);
+      if (opts.record !== false) { chatHistory.push({ type: "bubble", text: text, who: who, html: !!opts.html }); persistState(); }
+      if (who === "bot" && !opts.silent) speak(el.textContent);
     }
     return el;
   }
@@ -780,12 +785,12 @@ WIDGET_JS = r"""
   }
 
   var QUICK_ACTIONS = [
-    { icon: "\u2728", label: "Top recommendations", command: "What do you recommend?" },
+    { icon: "\u2728", label: "Top recommendations", command: "What do you recommend?", featured: true },
     { icon: "\uD83D\uDD0D", label: "Search products", command: "Show me products" },
     { icon: "\uD83D\uDED2", label: "Add an item to cart", command: "Add a t-shirt to my cart" },
-    { icon: "\uD83D\uDCB2", label: "Filter by price", command: "Show me products under $20" },
-    { icon: "\uD83D\uDEE1\uFE0F", label: "Claim a warranty", command: "I want to claim a warranty for order #1001" },
-    { icon: "\uD83D\uDCE6", label: "Track my order", command: "Track my order #1001" }
+    { icon: "\uD83C\uDFF7\uFE0F", label: "Filter by price", command: "Show me products under \u20B9800" },
+    { icon: "\uD83D\uDCE6", label: "Track my order", command: "Track my order #1001" },
+    { icon: "\uD83D\uDEE1\uFE0F", label: "Claim a warranty", command: "I want to claim a warranty for order #1001" }
   ];
   function renderQuickActions() {
     if (quickActionsRendered) return;
@@ -795,11 +800,11 @@ WIDGET_JS = r"""
     conversation.appendChild(row);
     QUICK_ACTIONS.forEach(function (action, i) {
       var btn = document.createElement("button");
-      btn.className = "quick-action-btn";
-      btn.textContent = action.icon + " " + action.label;
+      btn.className = "quick-action-btn" + (action.featured ? " featured" : "");
+      btn.innerHTML = '<span style="font-size:12px;">' + action.icon + '</span> ' + action.label;
       btn.addEventListener("click", function () { sendMessage(action.command); });
       row.appendChild(btn);
-      setTimeout(function () { btn.classList.add("show"); autoResizeConversation(); }, i * 500);
+      setTimeout(function () { btn.classList.add("show"); autoResizeConversation(); }, i * 40);
     });
   }
 
@@ -844,7 +849,7 @@ WIDGET_JS = r"""
     if (saved.quickActionsShown) renderQuickActions();
 
     (saved.history || []).forEach(function (item) {
-      if (item.type === "bubble") addBubble(item.text, item.who, { record: false, silent: true });
+      if (item.type === "bubble") addBubble(item.text, item.who, { record: false, silent: true, html: item.html });
       else if (item.type === "products") addProductRow(item.products, { record: false });
       else if (item.type === "confirm") addConfirmationButtons({ record: false, id: item.id });
     });
