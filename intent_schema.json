@@ -107,6 +107,23 @@
     },
 
     {
+      "name": "recommendations",
+      "description": "User wants product recommendations, suggestions, bestsellers, trending items, gift ideas, or items that pair with another product.",
+      "actions": [
+        { "name": "recommend_products", "requires_confirmation": false }
+      ],
+      "required_entities": [],
+      "optional_entities": ["query", "category", "target_product", "price_max", "recommendation_type"],
+      "example_utterances": [
+        "What do you recommend?",
+        "Show me your bestsellers",
+        "What's trending right now?",
+        "What goes well with this hoodie?",
+        "Any gift recommendations under $50?"
+      ]
+    },
+
+    {
       "name": "fallback",
       "description": "Message doesn't clearly match any defined intent, or confidence is too low to act on. Agent should ask a clarifying question rather than guess.",
       "actions": [

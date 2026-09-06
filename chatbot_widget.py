@@ -87,16 +87,27 @@ class ConfirmRequest(BaseModel):
     confirmed: bool
 
 
-def _get_store(shop: str) -> SimpleNamespace | None:
-    """Returns a lightweight object with .shop_domain and .access_token
-    attributes — shopify_actions.py was written expecting attribute
-    access (store.access_token), and Appwrite documents are plain dicts
-    (store["access_token"]), so this wrapper bridges the two without
-    needing to touch a single line of shopify_actions.py."""
+class _StoreWrapper:
+    """Wrapper that supports both attribute access (.access_token, .shop_domain, .id)
+    and dict subscripting (['$id'], ['access_token'], etc.) so all callers remain compatible."""
+    def __init__(self, doc: dict):
+        self._doc = doc
+        self.shop_domain = doc.get("shop_domain", "")
+        self.access_token = doc.get("access_token", "")
+        self.id = doc.get("$id", "")
+
+    def __getitem__(self, key):
+        return self._doc[key]
+
+    def get(self, key, default=None):
+        return self._doc.get(key, default)
+
+
+def _get_store(shop: str) -> _StoreWrapper | None:
     doc = repo.get_store(shop)
     if not doc:
         return None
-    return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
+    return _StoreWrapper(doc)
 
 
 def _log(shop: str, message: str, status: str, intent=None, action=None, entities=None, reply: str = "") -> None:
@@ -116,6 +127,9 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     out = {"status": "done", "reply": reply, "language": language, "intent": intent, "action": action}
     if widget_action:
         out["widget_action"] = widget_action
+    products = data.get("results") or data.get("recommendations") or data.get("recommended_products")
+    if products and isinstance(products, list):
+        out["products"] = products
     return out
 
 
@@ -196,7 +210,7 @@ async def confirm(req: ConfirmRequest):
     if not store:
         return {"reply": "Sorry, I couldn't verify this store."}
 
-    cfg = repo.ensure_customization(store["$id"])
+    cfg = repo.ensure_customization(store.id)
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
@@ -291,24 +305,24 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .conversation::-webkit-scrollbar-button, #ai-chat-widget-root .conversation::-webkit-scrollbar-button:single-button, #ai-chat-widget-root .product-row::-webkit-scrollbar-button, #ai-chat-widget-root .product-row::-webkit-scrollbar-button:single-button { display:none !important; width:0 !important; height:0 !important; background:transparent !important; }",
     "#ai-chat-widget-root .conversation::-webkit-scrollbar-corner, #ai-chat-widget-root .product-row::-webkit-scrollbar-corner { background:transparent !important; }",
     "#ai-chat-widget-root .conversation { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; padding-right:5px; }",
-    "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:12px; padding:9px 11px; font-size:11px; line-height:1.45; width:fit-content; max-width:92%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; }",
+    "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:12px; padding:9px 11px; font-size:11px; line-height:1.45; width:fit-content; max-width:92%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; flex-shrink:0; }",
     "#ai-chat-widget-root .bubble.bot { background:rgba(255,255,255,.75) !important; border:1px solid rgba(236,236,236,.8); color:#2a2a2a; box-shadow:0 2px 8px rgba(0,0,0,.05); align-self:flex-start; }",
     "#ai-chat-widget-root .bubble.user { background:#2b2b2b !important; color:#fff; align-self:flex-end; }",
     "#ai-chat-widget-root .bubble.typing { color:#999; font-style:italic; }",
     "#ai-chat-widget-root #greetingBubble { font-size:14px; font-weight:600; line-height:1.5; }",
-    "#ai-chat-widget-root .quick-actions { display:flex; flex-direction:column; gap:6px; align-self:flex-start; max-width:92%; }",
+    "#ai-chat-widget-root .quick-actions { display:flex; flex-direction:column; gap:6px; align-self:flex-start; max-width:92%; flex-shrink:0; }",
     "#ai-chat-widget-root .quick-action-btn { border:1px solid #e2e2e2; background:#fafafa; color:#2b2b2b; font-size:10.5px; font-weight:600; padding:5px 8px; border-radius:999px; text-align:left; cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .28s ease, transform .28s ease, background .15s ease; }",
     "#ai-chat-widget-root .quick-action-btn.show { opacity:1; transform:translateY(0); }",
     "#ai-chat-widget-root .quick-action-btn:hover { background:#f0f0f0; }",
-    "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; align-self:flex-start; max-width:100%; }",
-    "#ai-chat-widget-root .product-card { flex:0 0 auto; width:110px; border:1px solid #ececec; border-radius:10px; padding:6px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); display:flex; flex-direction:column; gap:4px; cursor:pointer; transition:box-shadow .15s ease, transform .15s ease; }",
+    "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; align-self:flex-start; max-width:100%; flex-shrink:0; }",
+    "#ai-chat-widget-root .product-card { flex:0 0 110px; width:110px; border:1px solid #ececec; border-radius:10px; padding:6px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); display:flex; flex-direction:column; gap:4px; cursor:pointer; transition:box-shadow .15s ease, transform .15s ease; flex-shrink:0; box-sizing:border-box; }",
     "#ai-chat-widget-root .product-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateY(-1px); }",
-    "#ai-chat-widget-root .product-card img { width:100%; height:70px; object-fit:cover; border-radius:6px; background:#f2f2f2; }",
-    "#ai-chat-widget-root .product-card .p-name { font-size:10px; font-weight:600; color:#222; max-height:26px; overflow:hidden; }",
-    "#ai-chat-widget-root .product-card .p-price { font-size:10.5px; font-weight:700; color:#2b2b2b; }",
-    "#ai-chat-widget-root .product-card button { margin-top:2px; border:none; background:#2b2b2b; color:#fff; font-size:9.5px; padding:3px 0; border-radius:999px; cursor:pointer; }",
+    "#ai-chat-widget-root .product-card img { width:100%; height:70px; object-fit:cover; border-radius:6px; background:#f2f2f2; flex-shrink:0; }",
+    "#ai-chat-widget-root .product-card .p-name { font-size:10px; font-weight:600; color:#222; max-height:26px; overflow:hidden; flex-shrink:0; line-height:1.3; }",
+    "#ai-chat-widget-root .product-card .p-price { font-size:10.5px; font-weight:700; color:#2b2b2b; flex-shrink:0; }",
+    "#ai-chat-widget-root .product-card button { margin-top:auto; border:none; background:#2b2b2b; color:#fff; font-size:9.5px; padding:4px 0; border-radius:999px; cursor:pointer; flex-shrink:0; }",
     "#ai-chat-widget-root .product-card button:disabled { background:#9c9c9c; }",
-    "#ai-chat-widget-root .confirm-row { display:flex; gap:8px; align-self:flex-start; }",
+    "#ai-chat-widget-root .confirm-row { display:flex; gap:8px; align-self:flex-start; flex-shrink:0; }",
     "#ai-chat-widget-root .confirm-btn { border:1px solid rgba(236,236,236,.8); background:rgba(255,255,255,.75); color:#2a2a2a; font-size:11px; font-weight:700; padding:6px 16px; border-radius:999px; cursor:pointer; transition:background .15s ease, color .15s ease, border-color .15s ease, transform .1s ease; }",
     "#ai-chat-widget-root .confirm-btn:hover:not(:disabled) { background:#2b2b2b; color:#fff; border-color:#2b2b2b; }",
     "#ai-chat-widget-root .confirm-btn:active { transform:scale(.96); }",
@@ -345,6 +359,9 @@ WIDGET_JS = r"""
             '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>' +
             '<span class="cart-badge" id="cartBadge">0</span>' +
           "</div>" +
+          '<button class="icon-btn" id="resetChat" title="Start new conversation" aria-label="Start new conversation">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>' +
+          '</button>' +
           '<button class="icon-btn" id="expandToggle" title="Expand chat" aria-label="Expand chat">' +
             '<svg class="icon-expand" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>' +
             '<svg class="icon-collapse" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>' +
@@ -374,6 +391,7 @@ WIDGET_JS = r"""
   var conversation = document.getElementById("conversation");
   var cartBadge = document.getElementById("cartBadge");
   var ttsToggle = document.getElementById("ttsToggle");
+  var resetChat = document.getElementById("resetChat");
   var expandToggle = document.getElementById("expandToggle");
   var headerAvatar = document.getElementById("headerAvatar");
   var headerName = document.getElementById("headerName");
@@ -460,6 +478,23 @@ WIDGET_JS = r"""
     persistState();
   });
 
+  if (resetChat) {
+    resetChat.addEventListener("click", function () {
+      try {
+        sessionStorage.removeItem(STATE_KEY);
+        sessionStorage.removeItem("chatSessionId");
+      } catch (e) {}
+      SESSION_ID = "sess_" + Math.random().toString(36).slice(2) + Date.now();
+      try { sessionStorage.setItem("chatSessionId", SESSION_ID); } catch (e) {}
+      chatHistory = [];
+      conversation.innerHTML = "";
+      addBubble((greetingBubble && greetingBubble.textContent) ? greetingBubble.textContent : "Hi! How can I help you today?", "bot", { record: false, silent: true });
+      quickActionsRendered = false;
+      renderQuickActions();
+      persistState();
+    });
+  }
+
   var quickActionsRendered = false;
   fab.addEventListener("click", function () {
     var isOpen = widget.classList.toggle("open");
@@ -493,20 +528,40 @@ WIDGET_JS = r"""
     products.forEach(function (p) {
       var card = document.createElement("div");
       card.className = "product-card";
-      var img = document.createElement("img");
-      img.src = p.image || ""; img.alt = p.name || "";
+
       var name = document.createElement("div");
       name.className = "p-name"; name.textContent = p.name || "Unnamed product";
+
+      if (p.image) {
+        var img = document.createElement("img");
+        img.src = p.image; img.alt = p.name || "";
+        img.onerror = function () {
+          img.style.display = "none";
+          var ph = document.createElement("div");
+          ph.style.cssText = "width:100%;height:70px;border-radius:6px;background:#f2f2f2;display:flex;align-items:center;justify-content:center;font-size:22px;";
+          ph.textContent = "\uD83D\uDECD\uFE0F";
+          card.insertBefore(ph, name);
+        };
+        card.appendChild(img);
+      } else {
+        var ph = document.createElement("div");
+        ph.style.cssText = "width:100%;height:70px;border-radius:6px;background:#f2f2f2;display:flex;align-items:center;justify-content:center;font-size:22px;";
+        ph.textContent = "\uD83D\uDECD\uFE0F";
+        card.appendChild(ph);
+      }
+
       var price = document.createElement("div");
       price.className = "p-price";
-      price.textContent = p.price !== undefined ? "$" + p.price : "";
+      var displayPrice = (typeof p.price === "number") ? p.price.toFixed(2) : p.price;
+      price.textContent = (displayPrice !== undefined && displayPrice !== null && displayPrice !== "") ? "$" + displayPrice : "";
+
       var btn = document.createElement("button");
       btn.textContent = "Add to cart";
       btn.addEventListener("click", function (e) {
         e.stopPropagation();
         cartAdd(p.id, 1, btn);
       });
-      card.appendChild(img); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
+      card.appendChild(name); card.appendChild(price); card.appendChild(btn);
       if (p.url) {
         card.addEventListener("click", function () { window.location.href = p.url; });
       }
@@ -672,6 +727,7 @@ WIDGET_JS = r"""
   }
 
   var QUICK_ACTIONS = [
+    { icon: "\u2728", label: "Top recommendations", command: "What do you recommend?" },
     { icon: "\uD83D\uDD0D", label: "Search products", command: "Show me products" },
     { icon: "\uD83D\uDED2", label: "Add an item to cart", command: "Add a t-shirt to my cart" },
     { icon: "\uD83D\uDCB2", label: "Filter by price", command: "Show me products under $20" },

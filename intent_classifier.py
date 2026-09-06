@@ -82,11 +82,41 @@ def _find_action(schema: dict, intent_name: str, action_name: str) -> dict | Non
     return None
 
 
+_RECOMMEND_FASTPATH = re.compile(
+    r"^(what('?s| is| are) (your )?(best[- ]?sellers?|trending|popular)( (right )?now| today)?|"
+    r"show (me )?(your )?(best[- ]?sellers?|trending|popular|recommendations?)|"
+    r"what (do|would|can) you recommend|"
+    r"(any |some )?recommendations?|"
+    r"(please )?recommend (me )?(some |a few )?(items?|products?|something)?|"
+    r"give me (some )?(product )?recommendations?|"
+    r"suggest (me )?(some |a few )?(items?|products?|something)|"
+    r"top (picks?|recommendations?|trending)|"
+    r"bestsellers?|"
+    r"trending( (items?|products?|now))?|"
+    r"gift (ideas?|recommendations?))$",
+    re.IGNORECASE,
+)
+
+
 def classify_intent(user_message: str, schema: dict | None = None) -> dict:
     """Classify a single user message. Returns a dict matching
     classification_output_format from the schema, with requires_confirmation
     filled in from the schema (not trusted from the model's own output)."""
     schema = schema or load_schema()
+
+    clean_msg = (user_message or "").strip().strip("?!.")
+    if _RECOMMEND_FASTPATH.match(clean_msg):
+        text = clean_msg.lower()
+        rec_type = "bestseller" if "best" in text else ("trending" if "trend" in text else "general")
+        return {
+            "intent": "recommendations",
+            "action": "recommend_products",
+            "entities": {"recommendation_type": rec_type},
+            "confidence": 0.98,
+            "requires_confirmation": False,
+            "language": "en",
+        }
+
     system_prompt = build_system_prompt(schema)
     
     # Before adding llm_selector and its create.chat.completions()

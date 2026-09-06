@@ -61,12 +61,16 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
     """
     language_name = LANGUAGE_NAMES.get(language, language)
 
+    extra_guidance = ""
+    if action_name in ("recommend_products", "search_products"):
+        extra_guidance = " Briefly and warmly introduce the picks in 1-2 sentences. The products are displayed as interactive cards directly below your message, so you do not need to list every product detail or price manually."
+
     system_prompt = (
         f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "
         f"({language}), regardless of what language this instruction is written in. "
         "Keep the reply short, warm, and easy to understand for a non-technical user. "
         "Use the structured data given to you as the source of truth — do not invent "
-        "details that aren't in it. If the data indicates an error or empty result, "
+        f"details that aren't in it.{extra_guidance} If the data indicates an error or empty result, "
         "say so gently and suggest what the user could try next."
     )
 
@@ -77,28 +81,32 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
         f"Write the reply in {language_name}."
     )
 
-    response = llm_selector.create_chat_completion(
-        temperature=0.4,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
-    
-    #  Before adding llm_selector.py and its create_chat_completion function
-
-    # response = _get_client().chat.completions.create(
-    #     model=MODEL,
-    #     temperature=0.4,
-    #     messages=[
-    #         {"role": "system", "content": system_prompt},
-    #         {"role": "user", "content": user_prompt},
-    #     ],
-    #     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    # )
-
-    return _strip_thinking(response.choices[0].message.content)
+    try:
+        response = llm_selector.create_chat_completion(
+            temperature=0.4,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        return _strip_thinking(response.choices[0].message.content)
+    except Exception as e:
+        print(f"reply_generator: LLM generation error ({e!r}), using fallback template")
+        if action_name in ("recommend_products",):
+            recs = data.get("recommendations") or data.get("results") or []
+            if recs:
+                return "Here are some of our top picks and bestsellers you might love! 🛍️"
+            return "Sorry, I couldn't find any recommendations right now. Try searching for a specific item!"
+        if action_name in ("search_products",):
+            results = data.get("results") or []
+            if results:
+                return f"I found {len(results)} item{'s' if len(results) != 1 else ''} for you:"
+            return "Sorry, I couldn't find any products matching that description."
+        if action_name in ("track_order",):
+            status = data.get("status") or "processing"
+            return f"Your order is currently {status}."
+        return "Here are the details from our store."
 
 
 if __name__ == "__main__":

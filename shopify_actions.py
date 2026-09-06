@@ -249,6 +249,118 @@ async def check_claim_status(store, entities: dict) -> dict:
     return {"order_number": order_number, "status": "no claim on file for this order"}
 
 
+def _parse_float(val) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    cleaned = str(val).replace("$", "").replace("€", "").replace("£", "").replace(",", "").strip()
+    try:
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_product(store, p: dict) -> dict | None:
+    variants = p.get("variants") or []
+    if not variants:
+        return None
+    variant = variants[0]
+    handle = p.get("handle", "")
+    url = f"https://{store.shop_domain}/products/{handle}" if handle else ""
+    image_src = ""
+    if p.get("image") and isinstance(p["image"], dict):
+        image_src = p["image"].get("src", "")
+    elif p.get("images") and isinstance(p["images"], list) and len(p["images"]) > 0:
+        first_img = p["images"][0]
+        image_src = first_img.get("src", "") if isinstance(first_img, dict) else str(first_img)
+
+    raw_price = variant.get("price", 0)
+    parsed_price = _parse_float(raw_price)
+    return {
+        "id": str(variant.get("id")),
+        "product_id": str(p.get("id")),
+        "name": p.get("title", "Unnamed product"),
+        "price": parsed_price if parsed_price is not None else 0.0,
+        "image": image_src,
+        "url": url,
+    }
+
+
+async def _fetch_shopify_recommendations(store, product_id: str | int, intent: str = "related", limit: int = 4) -> list[dict]:
+    """Calls Shopify's native recommendation endpoint:
+    https://{shop_domain}/recommendations/products.json?product_id={id}&intent={intent}&limit={limit}
+    This endpoint uses Shopify's machine-learning model trained on real buyer co-purchases."""
+    url = f"https://{store.shop_domain}/recommendations/products.json"
+    params = {"product_id": str(product_id), "intent": intent, "limit": limit}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code == 200:
+                products = resp.json().get("products", [])
+                formatted = [_format_product(store, p) for p in products]
+                return [f for f in formatted if f]
+    except Exception as e:
+        print(f"shopify_actions: recommendations.products.json error: {e}")
+    return []
+
+
+# ==========================================================================
+# recommendations
+# ==========================================================================
+async def recommend_products(store, entities: dict) -> dict:
+    rec_type = entities.get("recommendation_type", "general")
+    target_product = entities.get("target_product") or entities.get("query")
+    price_max = entities.get("price_max")
+    category = (entities.get("category") or "").lower()
+
+    recommendations = []
+
+    # 1. If a specific anchor product is provided, try native Shopify recommendations first
+    if target_product:
+        variant = await _resolve_variant(store, target_product)
+        if variant and variant.get("product_id"):
+            recommendations = await _fetch_shopify_recommendations(store, variant["product_id"], intent="related", limit=4)
+
+    # 2. If no target product or native endpoint returned empty, query catalog for bestsellers/trending/category
+    if not recommendations:
+        params = {"status": "active", "limit": 25}
+        resp = await _get(store, "products.json", params)
+        if resp.status_code == 200:
+            products = resp.json().get("products", [])
+            for p in products:
+                # Filter by category/tags if specified
+                if category:
+                    ptype = (p.get("product_type") or "").lower()
+                    ptags = (p.get("tags") or "").lower()
+                    ptitle = (p.get("title") or "").lower()
+                    if category not in ptype and category not in ptags and category not in ptitle:
+                        continue
+
+                formatted = _format_product(store, p)
+                if not formatted:
+                    continue
+
+                parsed_price_max = _parse_float(price_max)
+                if parsed_price_max is not None and formatted["price"] > parsed_price_max:
+                    continue
+
+                # Don't recommend the exact product they are asking about
+                if target_product and target_product.lower() in formatted["name"].lower():
+                    continue
+
+                recommendations.append(formatted)
+                if len(recommendations) >= 4:
+                    break
+
+    return {
+        "recommendation_type": rec_type,
+        "recommendations": recommendations,
+        "results": recommendations,  # for widget card rendering compatibility
+        "count": len(recommendations),
+    }
+
+
 # ==========================================================================
 # product_search
 # ==========================================================================
@@ -262,18 +374,18 @@ async def search_products(store, entities: dict) -> dict:
     if resp.status_code != 200:
         return {"error": "lookup_failed"}
 
-    price_min = entities.get("price_min")
-    price_max = entities.get("price_max")
+    price_min = _parse_float(entities.get("price_min"))
+    price_max = _parse_float(entities.get("price_max"))
     color = (entities.get("color") or "").lower()
     size = (entities.get("size") or "").lower()
 
     results = []
     for p in resp.json().get("products", []):
         for variant in p.get("variants", [{}]):
-            price = float(variant.get("price", 0) or 0)
-            if price_min is not None and price < float(price_min):
+            price = _parse_float(variant.get("price", 0)) or 0.0
+            if price_min is not None and price < price_min:
                 continue
-            if price_max is not None and price > float(price_max):
+            if price_max is not None and price > price_max:
                 continue
             opts = " ".join(str(v) for v in [variant.get("option1"), variant.get("option2"), variant.get("option3")] if v).lower()
             if color and color not in opts:
@@ -282,9 +394,11 @@ async def search_products(store, entities: dict) -> dict:
                 continue
             results.append({
                 "id": str(variant.get("id")),
+                "product_id": str(p.get("id")),
                 "name": p.get("title", "Unnamed product"),
                 "price": price,
                 "image": (p.get("image") or {}).get("src", ""),
+                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
             })
             break
         if len(results) >= 6:
@@ -349,6 +463,7 @@ ACTION_MAP = {
     "warranty_claim.submit_claim": submit_claim,
     "warranty_claim.check_claim_status": check_claim_status,
     "product_search.search_products": search_products,
+    "recommendations.recommend_products": recommend_products,
     "policy_query.answer_policy_question": answer_policy_question,
     "fallback.clarify": clarify,
 }

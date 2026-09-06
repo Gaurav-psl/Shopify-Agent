@@ -257,6 +257,7 @@ INTENT_LABELS = {
     "cart_management": ("Cart Management", "shopping_cart"),
     "warranty_claim": ("Warranty & Returns", "check_circle"),
     "product_search": ("Product Search", "search"),
+    "recommendations": ("Product Recommendations", "auto_awesome"),
     "policy_query": ("Store Policy Questions", "menu_book"),
     "fallback": ("Unclear / Other", "help_outline"),
 }

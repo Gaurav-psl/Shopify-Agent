@@ -15,3 +15,7 @@ static/uploads/
 
 # Editor
 .vscode/
+
+# Local previews & scratch
+preview_*.html
+*.png
