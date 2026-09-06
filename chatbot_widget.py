@@ -540,6 +540,35 @@ WIDGET_JS = r"""
     return el;
   }
 
+  var CURRENCY_MAP = {
+    INR: "\u20B9",
+    USD: "$",
+    EUR: "\u20AC",
+    GBP: "\u00A3",
+    CAD: "CA$",
+    AUD: "A$",
+    JPY: "\u00A5",
+    AED: "AED ",
+    SGD: "S$",
+    NZD: "NZ$"
+  };
+  var detectedCurrencySymbol = "";
+  function getCurrencySymbol() {
+    if (detectedCurrencySymbol) return detectedCurrencySymbol;
+    try {
+      var code = (window.Shopify && window.Shopify.currency && window.Shopify.currency.active) || "";
+      if (code && CURRENCY_MAP[code]) {
+        detectedCurrencySymbol = CURRENCY_MAP[code];
+        return detectedCurrencySymbol;
+      }
+      if (code) {
+        detectedCurrencySymbol = code + " ";
+        return detectedCurrencySymbol;
+      }
+    } catch (e) {}
+    return "$";
+  }
+
   function addProductRow(products, opts) {
     opts = opts || {};
     var row = document.createElement("div");
@@ -572,7 +601,8 @@ WIDGET_JS = r"""
       var price = document.createElement("div");
       price.className = "p-price";
       var displayPrice = (typeof p.price === "number") ? p.price.toFixed(2) : p.price;
-      price.textContent = (displayPrice !== undefined && displayPrice !== null && displayPrice !== "") ? "$" + displayPrice : "";
+      var sym = getCurrencySymbol();
+      price.textContent = (displayPrice !== undefined && displayPrice !== null && displayPrice !== "") ? sym + displayPrice : "";
 
       var btn = document.createElement("button");
       btn.textContent = "Add to cart";
@@ -662,6 +692,9 @@ WIDGET_JS = r"""
   function refreshCartBadge() {
     fetch("/cart.js").then(function (r) { return r.json(); }).then(function (cart) {
       updateCartBadge(cart.item_count);
+      if (cart.currency) {
+        detectedCurrencySymbol = CURRENCY_MAP[cart.currency] || (cart.currency + " ");
+      }
     }).catch(function () {});
   }
 
@@ -709,10 +742,11 @@ WIDGET_JS = r"""
   function cartView() {
     fetch("/cart.js").then(function (r) { return r.json(); }).then(function (cart) {
       if (!cart.items.length) { addBubble("Your cart is empty.", "bot"); return; }
+      var sym = getCurrencySymbol();
       var lines = cart.items.map(function (it) {
-        return it.quantity + "x " + it.product_title + " (" + (it.final_line_price / 100).toFixed(2) + ")";
+        return it.quantity + "x " + it.product_title + " (" + sym + (it.final_line_price / 100).toFixed(2) + ")";
       });
-      addBubble("Your cart:\n" + lines.join("\n") + "\nTotal: " + (cart.total_price / 100).toFixed(2), "bot");
+      addBubble("Your cart:\n" + lines.join("\n") + "\nTotal: " + sym + (cart.total_price / 100).toFixed(2), "bot");
       updateCartBadge(cart.item_count);
     }).catch(function () {});
   }
