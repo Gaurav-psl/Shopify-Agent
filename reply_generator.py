@@ -14,15 +14,16 @@ the human-facing phrasing.
 import os
 import json
 import re
+import llm_selector
 from openai import OpenAI
 
-MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
 
 _client = None
 
 # Qwen3-family models can emit an internal reasoning block wrapped in
 # <think>...</think> before the actual answer when "thinking mode" is on.
 # Strip it out so only the final, user-facing reply ever reaches the widget.
+#  primary model : Qwen/Qwen3-8B-AWQ 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
@@ -31,15 +32,6 @@ def _strip_thinking(text: str) -> str:
         return ""
     return _THINK_RE.sub("", text).strip()
 
-
-def _get_client():
-    """Lazy init — same reasoning as intent_classifier.py: a missing key
-    should only break reply generation, never app startup."""
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"),
-                        base_url=os.environ.get("OPENAI_BASE_URL") )
-    return _client
 
 LANGUAGE_NAMES = {
     "en": "English",
@@ -86,8 +78,7 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
         f"Write the reply in {language_name}."
     )
 
-    response = _get_client().chat.completions.create(
-        model=MODEL,
+    response = llm_selector.create_chat_completion(
         temperature=0.4,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -95,6 +86,18 @@ def generate_reply(action_name: str, data: dict, language: str, original_message
         ],
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
+    
+    #  Before adding llm_selector.py and its create_chat_completion function
+
+    # response = _get_client().chat.completions.create(
+    #     model=MODEL,
+    #     temperature=0.4,
+    #     messages=[
+    #         {"role": "system", "content": system_prompt},
+    #         {"role": "user", "content": user_prompt},
+    #     ],
+    #     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    # )
 
     return _strip_thinking(response.choices[0].message.content)
 
