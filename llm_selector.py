@@ -40,7 +40,7 @@ from openai import OpenAI
 
 PRIMARY_API_KEY = os.environ.get("PRIMARY_LLM_API_KEY", "")
 PRIMARY_BASE_URL = os.environ.get("PRIMARY_LLM_BASE_URL") or None
-PRIMARY_MODEL = os.environ.get("PRIMARY_LLM_MODEL", "gpt-4o-mini")
+PRIMARY_MODEL = os.environ.get("PRIMARY_LLM_MODEL", "Qwen/Qwen3-8B-AWQ")
 
 
 def _load_fallback_providers() -> list[dict]:
