@@ -30,6 +30,7 @@ import os
 import time
 import hashlib
 import requests
+from langfuse import observe,get_client
 
 DIFY_BASE_URL = os.environ.get("DIFY_BASE_URL", "").rstrip("/")
 DIFY_DATASET_API_KEY = os.environ.get("DIFY_DATASET_API_KEY", "")
@@ -148,7 +149,7 @@ def _prune_expired() -> None:
     for k in expired:
         del _retrieval_cache[k]
 
-
+@observe(name="rag_retrieve")
 def retrieve_context(
     store_identifier: str,
     query: str,
@@ -220,6 +221,7 @@ def retrieve_context(
         for r in records
         if r.get("segment", {}).get("content")
     ]
+    get_client().update_current_span(metadata={...})
 
     if use_cache:
         _retrieval_cache[key] = {"timestamp": time.time(), "chunks": chunks}

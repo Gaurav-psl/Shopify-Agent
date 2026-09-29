@@ -16,7 +16,8 @@ import json
 import re
 import llm_selector
 from pathlib import Path
-from openai import OpenAI
+from langfuse import observe,get_client
+# from openai import OpenAI      -- not needed now as this is being imported and used in LLM Selector which provides a new function to this file for use
 
 SCHEMA_PATH = Path(__file__).parent / "intent_schema.json"
 # MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-8B-AWQ")
@@ -81,7 +82,7 @@ def _find_action(schema: dict, intent_name: str, action_name: str) -> dict | Non
                     return action
     return None
 
-
+@observe(name="classify_intent")
 def classify_intent(user_message: str, schema: dict | None = None) -> dict:
     """Classify a single user message. Returns a dict matching
     classification_output_format from the schema, with requires_confirmation

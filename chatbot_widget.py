@@ -32,6 +32,7 @@ import time
 from types import SimpleNamespace
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
+from langfuse import observe, get_client
 
 import repository_appwrite as repo
 from intent_classifier import classify_intent, load_schema
@@ -108,11 +109,18 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: log_request failed: {e!r}")
 
-
+@observe(name="execute_and_reply")
 async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities)
     data, widget_action = _split_widget_action(raw)
-    reply = generate_reply(action, data, language, original_message)
+    rag_query = original_message
+    if action == "answer_policy_question" and entities.get("policy_type"):
+        rag_query = f"{entities['policy_type'].replace('_', ' ')}: {original_message}"
+
+    reply = generate_reply(action, data, language, original_message,
+        store_identifier=store.shop_domain,
+        needs_rag=(action == "answer_policy_question"),
+        rag_query=rag_query)
     out = {"status": "done", "reply": reply, "language": language, "intent": intent, "action": action}
     if widget_action:
         out["widget_action"] = widget_action
@@ -120,6 +128,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
 
 
 @router.post("/chat")
+@observe(name="chat_request")
 async def chat(req: ChatRequest):
     message = (req.message or "").strip()
     if not message:
@@ -154,6 +163,7 @@ async def chat(req: ChatRequest):
     try:
         classification = classify_intent(message, SCHEMA)
     except Exception as e:  # noqa: BLE001
+        get_client().update_current_span(level="ERROR", status_message=str(e))
         import traceback
         print(f"chatbot_widget: classify_intent error: {e!r}")
         print(f"chatbot_widget: underlying cause: {e.__cause__!r}")
@@ -184,13 +194,15 @@ async def chat(req: ChatRequest):
         result = await _execute_and_reply(store, intent, action, entities, language, message)
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
+        get_client().update_current_span(level="ERROR", status_message=str(e))  # noqa: BLE001
         print(f"chatbot_widget: dispatch error: {e}")
         _log(req.shop, message, "error", intent, action, entities)
         return {"reply": "Sorry, something went wrong completing that. Please try again."}
 
 
 @router.post("/confirm")
+@observe(name="confirm_request")
 async def confirm(req: ConfirmRequest):
     store = _get_store(req.shop)
     if not store:

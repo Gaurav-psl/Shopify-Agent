@@ -21,7 +21,10 @@ import os
 import json
 import re
 import llm_selector
+import rag_retriever 
 from openai import OpenAI
+from langfuse import observe,get_client
+
 
 
 _client = None
@@ -69,13 +72,16 @@ def _format_rag_context(rag_context: list[dict]) -> str:
             parts.append(f"[{i}] {content}")
     return "\n\n".join(parts)
 
-
+@observe(name="generate_reply")
 def generate_reply(
     action_name: str,
     data: dict,
     language: str,
     original_message: str,
+    store_identifier=None, needs_rag=False,
     rag_context: list[dict] | None = None,
+    rag_query: str | None = None,   # NEW — defaults to original_message if not given
+
 ) -> str:
     """
     action_name: e.g. "track_order", "search_products"
@@ -85,6 +91,12 @@ def generate_reply(
     rag_context: optional list of retrieved chunks from rag_retriever.retrieve_context(),
                  e.g. [{"content": "...", "score": 0.87, "document": "policy.txt"}, ...]
     """
+    if rag_context is None and needs_rag:
+        if not store_identifier:
+            print("reply_generator: needs_rag=True but no store_identifier given, skipping retrieval")
+        else:
+            rag_context = rag_retriever.retrieve_context(store_identifier, rag_query or original_message)
+            
     language_name = LANGUAGE_NAMES.get(language, language)
 
     rag_context_text = _format_rag_context(rag_context) if rag_context else ""

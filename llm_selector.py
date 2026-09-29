@@ -36,7 +36,7 @@ shape) — true for anything you can point the `openai` Python SDK's
 import json
 import os
 
-from openai import OpenAI
+from langfuse.openai import OpenAI
 
 PRIMARY_API_KEY = os.environ.get("PRIMARY_LLM_API_KEY", "")
 PRIMARY_BASE_URL = os.environ.get("PRIMARY_LLM_BASE_URL") or None
@@ -83,7 +83,7 @@ def _get_primary() -> OpenAI:
             api_key=PRIMARY_API_KEY,
             base_url=PRIMARY_BASE_URL,
             max_retries=2,
-            timeout=5,
+            timeout=10,
         )
     return _primary_client
 
@@ -95,7 +95,7 @@ def _get_fallback_client(index: int) -> OpenAI:
             api_key=provider["api_key"],
             base_url=provider["base_url"],
             max_retries=2,
-            timeout=5,
+            timeout=20,
         )
     return _fallback_clients[index]
 
