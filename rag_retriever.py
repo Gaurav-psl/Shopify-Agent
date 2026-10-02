@@ -198,7 +198,7 @@ def retrieve_context(
 
     try:
         resp = requests.post(
-            f"{DIFY_BASE_URL}/v1/datasets/{dataset_id}/retrieve",
+            f"{DIFY_BASE_URL}/datasets/{dataset_id}/retrieve",
             headers={
                 "Authorization": f"Bearer {DIFY_DATASET_API_KEY}",
                 "Content-Type": "application/json",
