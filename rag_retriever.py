@@ -50,7 +50,7 @@ CACHE_TTL_SECONDS = 300
 # store_id, a shop domain, an API key prefix — pick one canonical identifier
 # and use it consistently across your backend).
 STORE_DATASET_MAP: dict[str, str] = {
-    "dripire": "a58914ca-8735-4a52-841e-42f53eb277d7",
+    "nhtcnc-hs.myshopify.com": "a58914ca-8735-4a52-841e-42f53eb277d7",
     "store_demo_1": "f8a2b1c3-0000-0000-0000-000000000002",
     "store_demo_2": "f8a2b1c3-0000-0000-0000-000000000003",
 }
