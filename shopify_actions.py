@@ -369,9 +369,10 @@ async def list_recent_orders(store, entities: dict, session_id: str) -> dict:
         }
 
     resp = await _get(store, "orders.json", {"status": "any", "limit": 5, "order": "created_at desc", "email": email})
-if resp.status_code != 200:
-    print(f"track_order: orders.json -> {resp.status_code} {resp.text[:400]}")
-    return {"error": "lookup_failed", "message": "Could not reach Shopify to look up this order."}
+    if resp.status_code != 200:
+        print(f"track_order: orders.json -> {resp.status_code} {resp.text[:400]}")
+        return {"error": "lookup_failed", "message": "Could not reach Shopify to look up orders."}
+
     orders = resp.json().get("orders", [])
     return {
         "orders": [
