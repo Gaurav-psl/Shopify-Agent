@@ -300,15 +300,18 @@ async def track_order(store, entities: dict, session_id: str) -> dict:
 
     resp = await _get(store, "orders.json", {"name": f"#{order_number}", "status": "any"})
     if resp.status_code != 200:
+        print(f"track_order: orders.json -> {resp.status_code} {resp.text[:400]}")
         return {"error": "lookup_failed", "message": "Could not reach Shopify to look up this order."}
 
     orders = resp.json().get("orders", [])
     if not orders:
+        print(f"track_order: no order found for name=#{order_number}")
         return {"error": "not_found", "order_number": order_number}
 
     order = orders[0]
     order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
     if not order_email or order_email != email:
+        print(f"track_order: email mismatch for #{order_number} (order email present: {bool(order_email)})")
         return {
             "error": "verification_failed",
             "order_number": order_number,
