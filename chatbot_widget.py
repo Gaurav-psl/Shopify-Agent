@@ -78,6 +78,7 @@ _NEGATIVE = {"no", "n", "nope", "cancel", "nah", "non", "nahi"}
 # gates which classifier action. Anything not listed here is always allowed.
 _FEATURE_FOR_ACTION = {
     ("product_search", "search_products"): "product_search",
+    ("product_recommendation", "recommend_products"): "recommendations",
     ("cart_management", "add_item"): "cart_editing",
     ("cart_management", "remove_item"): "cart_editing",
     ("cart_management", "edit_quantity"): "cart_editing",
@@ -172,7 +173,7 @@ def _feature_enabled(store_id: str, intent: str, action: str, entities: dict) ->
     base = _FEATURE_FOR_ACTION.get((intent, action))
     if base:
         keys.append(base)
-    if (intent, action) == ("product_search", "search_products"):
+    if (intent, action) in (("product_search", "search_products"), ("product_recommendation", "recommend_products")):
         if any(entities.get(k) not in (None, "", []) for k in _FILTER_ENTITIES):
             keys.append("product_filtering")
     if not keys:
@@ -340,7 +341,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
 
     # Exact-title search came back empty → retry with the forgiving
     # catalog search before telling the shopper "not found".
-    if action == "search_products" and isinstance(data, dict) and not data.get("error") and not data.get("results"):
+    if action in ("search_products", "recommend_products") and isinstance(data, dict) and not data.get("error") and not data.get("results"):
         query = entities.get("query") or entities.get("category")
         if query:
             alt = await _catalog_search(store, str(query))
@@ -349,7 +350,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 if alt:
                     data = {**data, "results": alt}
 
-    products = data.get("results") if action == "search_products" and isinstance(data, dict) else None
+    products = data.get("results") if action in ("search_products", "recommend_products") and isinstance(data, dict) else None
     orders = None
     if action == "list_recent_orders" and isinstance(data, dict) and isinstance(data.get("orders"), list):
         orders = [{"id": o.get("order_number"), "status": o.get("status")} for o in data["orders"] if o.get("order_number")]

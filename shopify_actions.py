@@ -655,6 +655,92 @@ async def search_products(store, entities: dict, session_id: str) -> dict:
     return {"results": results, "filters_applied": entities}
 
 
+def _pref_text(entities: dict) -> str:
+    return " ".join(str(entities.get(k, "")).strip() for k in ("query", "category") if entities.get(k)).strip().lower()
+
+
+def _pref_keywords(entities: dict) -> list[str]:
+    text = _pref_text(entities)
+    return [w for w in re.findall(r"[a-z0-9]+", text) if len(w) >= 2]
+
+
+def _variant_matches_filters(variant: dict, entities: dict, haystack: str) -> tuple[bool, float, str]:
+    price_min = entities.get("price_min")
+    price_max = entities.get("price_max")
+    color = (entities.get("color") or "").strip().lower()
+    size = (entities.get("size") or "").strip().lower()
+
+    try:
+        price = float(variant.get("price", 0) or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+
+    if price_min is not None and price < float(price_min):
+        return False, price, ""
+    if price_max is not None and price > float(price_max):
+        return False, price, ""
+
+    opts = " ".join(str(v) for v in [variant.get("option1"), variant.get("option2"), variant.get("option3")] if v).lower()
+    if color and color not in opts and color not in haystack:
+        return False, price, opts
+    if size and size not in opts and size not in haystack:
+        return False, price, opts
+
+    return True, price, opts
+
+
+async def recommend_products(store, entities: dict, session_id: str) -> dict:
+    """Generalized product recommendations using catalog metadata and optional
+    shopper preferences (query/category/color/size/price range)."""
+    resp = await _get(store, "products.json", {"status": "active", "limit": 250})
+    if resp.status_code != 200:
+        return {"error": "lookup_failed"}
+
+    keywords = _pref_keywords(entities)
+    has_filters = any(entities.get(k) not in (None, "", []) for k in ("price_min", "price_max", "color", "size"))
+    scored: list[tuple[int, float, int, dict]] = []
+
+    for idx, product in enumerate(resp.json().get("products", [])):
+        title = product.get("title", "Unnamed product")
+        haystack = f"{title} {product.get('product_type', '')} {product.get('tags', '')}".lower()
+        best = None
+        for variant in product.get("variants", [{}]):
+            ok, price, _opts = _variant_matches_filters(variant, entities, haystack)
+            if not ok:
+                continue
+
+            score = 1
+            if keywords:
+                score += sum(2 for kw in keywords if kw in haystack)
+                score += sum(1 for kw in keywords if kw in str(variant.get("title", "")).lower())
+            if entities.get("color") and entities.get("color").strip().lower() in haystack:
+                score += 1
+            if entities.get("size") and entities.get("size").strip().lower() in haystack:
+                score += 1
+
+            candidate = {
+                "id": str(variant.get("id")),
+                "name": title,
+                "price": price,
+                "image": (product.get("image") or {}).get("src", ""),
+            }
+            if best is None or score > best[0]:
+                best = (score, candidate)
+
+        if best is None:
+            continue
+        scored.append((best[0], best[1]["price"], idx, best[1]))
+
+    if keywords:
+        scored.sort(key=lambda x: (-x[0], x[1], x[2]))
+    else:
+        scored.sort(key=lambda x: (x[1], x[2]))
+
+    results = [item for *_meta, item in scored[:6]]
+    strategy = "preference_scored" if (keywords or has_filters) else "general_catalog"
+    return {"results": results, "filters_applied": entities, "strategy": strategy}
+
+
 # ==========================================================================
 # policy_query — Shopify's real store policies (Admin API), not mocks.
 # ==========================================================================
@@ -711,6 +797,7 @@ ACTION_MAP = {
     "warranty_claim.submit_claim": submit_claim,
     "warranty_claim.check_claim_status": check_claim_status,
     "product_search.search_products": search_products,
+    "product_recommendation.recommend_products": recommend_products,
     "policy_query.answer_policy_question": answer_policy_question,
     "fallback.clarify": clarify,
 }

@@ -50,6 +50,7 @@ action hits the real Shopify Admin API instead of mock data.
 
 - **Order tracking** — status, fulfillment, tracking number, recent orders
 - **Product search & filtering** — by keyword, price range, color, size
+- **Product recommendations** — generalized recommendations using shopper preferences (query, category, color, size, budget)
 - **Cart management** — add/remove/edit quantity/view/clear
 - **Warranty claims** — files a tagged note on the order for the merchant to action, plus status checks
 - **Store policy Q&A** — pulled live from the store's actual published policies

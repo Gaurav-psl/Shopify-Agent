@@ -157,6 +157,31 @@
       ]
     },
     {
+      "name": "product_recommendation",
+      "description": "User wants personalized or general product recommendations based on interest, budget, or preferences.",
+      "actions": [
+        {
+          "name": "recommend_products",
+          "requires_confirmation": false
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "query",
+        "category",
+        "price_min",
+        "price_max",
+        "color",
+        "size",
+        "sort_by"
+      ],
+      "example_utterances": [
+        "Can you recommend something for a birthday gift?",
+        "Suggest some shoes under $80",
+        "Recommend a blue hoodie for me"
+      ]
+    },
+    {
       "name": "policy_query",
       "description": "User is asking about store policies rather than their own account or order.",
       "actions": [
