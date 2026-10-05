@@ -336,6 +336,7 @@ def _as_variant_id(value):
 @observe(name="execute_and_reply")
 async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str, session_id: str) -> dict:
     raw = await shopify_actions.dispatch(intent, action, store, entities, session_id)
+    print(f"DEBUG dispatch: {intent}.{action} entities={entities} -> {raw}")
     data, widget_action = _split_widget_action(raw)
 
     # Exact-title search came back empty → retry with the forgiving
