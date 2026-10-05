@@ -554,8 +554,8 @@ async def chat(req: ChatRequest):
     entities = classification.get("entities") or {}
     if intent == "order_tracking" and not (entities.get("order_number") or entities.get("order_id")):
         m = _ORDER_NO_RE.search(message)
-            if m:
-                entities["order_number"] = m.group(1)
+        if m:
+            entities["order_number"] = m.group(1)
     language = classification["language"]
 
     try:
