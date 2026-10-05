@@ -109,13 +109,28 @@ def generate_reply(
             "to answer, say so honestly and suggest the user contact support instead of guessing."
         )
 
+    tracking_clause = ""
+    if action_name == "track_order":
+        tracking_clause = (
+            " This is an order tracking reply — explicitly and clearly state three "
+            "things when they're present in the data: the shipment's current status "
+            "(e.g. in transit, out for delivery, delivered), its current location "
+            "(current_location), and the estimated delivery date (estimated_delivery). "
+            "Don't bury these in vague phrasing — name them plainly, each in its own "
+            "clause. If current_location is missing or null, say the status clearly "
+            "anyway and mention that a precise location isn't available yet, offering "
+            "the tracking link (tracking_url) so the shopper can check directly with "
+            "the carrier. Never state a location, status, or delivery date that isn't "
+            "literally present in the data."
+        )
+
     system_prompt = (
         f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "
         f"({language}), regardless of what language this instruction is written in. "
         "Keep the reply short, warm, and easy to understand for a non-technical user. "
         "Use the structured data given to you as the source of truth — do not invent "
-        f"details that aren't in it.{rag_clause} If the data indicates an error or empty result, "
-        "say so gently and suggest what the user could try next."
+        f"details that aren't in it.{rag_clause}{tracking_clause} If the data indicates "
+        "an error or empty result, say so gently and suggest what the user could try next."
     )
 
     user_prompt_parts = [
