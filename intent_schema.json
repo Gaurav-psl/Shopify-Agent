@@ -183,6 +183,31 @@
       ]
     },
     {
+      "name": "customer_account",
+      "description": "User wants information about their own authenticated account, order history, or personalized recommendations.",
+      "actions": [
+        {
+          "name": "get_my_orders",
+          "requires_confirmation": false
+        },
+        {
+          "name": "get_recommendations",
+          "requires_confirmation": false
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [],
+      "example_utterances": [
+        "Show all my orders",
+        "Show my previous orders",
+        "What have I ordered?",
+        "Show my active orders",
+        "Recommend something for me",
+        "What would you recommend for me?",
+        "Find something I would like"
+      ]
+    },
+    {
       "name": "fallback",
       "description": "Message doesn't clearly match any defined intent, or confidence is too low to act on. Agent should ask a clarifying question rather than guess.",
       "actions": [
