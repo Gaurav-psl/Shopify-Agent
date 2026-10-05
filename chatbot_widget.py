@@ -363,7 +363,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     reply = _safe_reply(
         action, _llm_view(data), language, original_message, fallback,
         store_identifier=store.shop_domain,
-        needs_rag=(action == "answer_policy_question" or action == "search_products"),
+        needs_rag=(action == "answer_policy_question"),
         rag_query=rag_query,
     )
     out = {"status": "done", "reply": reply, "language": language, "intent": intent, "action": action}
@@ -776,7 +776,8 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .quick-action-btn { border:1px solid #e2e2e2; background:#fafafa; color:#2b2b2b; font-size:10.5px; font-weight:600; padding:5px 8px; border-radius:999px; text-align:left; cursor:pointer; opacity:0; transform:translateY(6px); transition:opacity .28s ease, transform .28s ease, background .15s ease; }",
     "#ai-chat-widget-root .quick-action-btn.show { opacity:1; transform:translateY(0); }",
     "#ai-chat-widget-root .quick-action-btn:hover { background:#f0f0f0; }",
-    "#ai-chat-widget-root .product-row { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 4px; align-self:flex-start; max-width:100%; }",
+    "#ai-chat-widget-root .conversation > * { flex-shrink:0; }",
+    "#ai-chat-widget-root .product-row { display:flex; flex-shrink:0; gap:8px; overflow-x:auto; overflow-y:visible; padding:2px 2px 4px; align-self:flex-start; max-width:100%; min-height:fit-content; }",
     "#ai-chat-widget-root .product-card { flex:0 0 auto; width:110px; border:1px solid #ececec; border-radius:10px; padding:6px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); display:flex; flex-direction:column; gap:4px; cursor:pointer; transition:box-shadow .15s ease, transform .15s ease; }",
     "#ai-chat-widget-root .product-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateY(-1px); }",
     "#ai-chat-widget-root .product-card img { width:100%; height:70px; object-fit:cover; border-radius:6px; background:#f2f2f2; }",
