@@ -46,8 +46,9 @@ Conversation state kept in PENDING (in-memory, 5 min TTL, per shop+session):
 
 import re
 import time
+import os
 from types import SimpleNamespace
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 from langfuse import observe, get_client
 
@@ -55,6 +56,7 @@ import repository_appwrite as repo
 from intent_classifier import classify_intent, load_schema
 from reply_generator import generate_reply
 import shopify_actions
+import customer_profiles
 
 router = APIRouter(tags=["chatbot-widget"])
 
@@ -121,12 +123,27 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "anonymous"
     shop: str
+    customer_token: str | None = None
 
 
 class ConfirmRequest(BaseModel):
     shop: str
     session_id: str = "anonymous"
     confirmed: bool
+    customer_token: str | None = None
+
+
+_CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
+
+
+def _remember_customer(shop: str, session_id: str, customer_id: str | None) -> None:
+    key=(shop,session_id)
+    if customer_id: _CUSTOMER_SESSIONS[key]=str(customer_id)
+    else: _CUSTOMER_SESSIONS.pop(key,None)
+
+
+def _session_customer(shop: str, session_id: str) -> str | None:
+    return _CUSTOMER_SESSIONS.get((shop,session_id))
 
 
 def _get_store(shop: str) -> SimpleNamespace | None:
@@ -334,8 +351,8 @@ def _as_variant_id(value):
 # Execution
 # =======================================================================
 @observe(name="execute_and_reply")
-async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str, session_id: str) -> dict:
-    raw = await shopify_actions.dispatch(intent, action, store, entities, session_id)
+async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str, session_id: str, customer_id: str | None = None) -> dict:
+    raw = await shopify_actions.dispatch(intent, action, store, entities, session_id, customer_id=customer_id)
     print(f"DEBUG dispatch: {intent}.{action} entities={entities} -> {raw}")
     data, widget_action = _split_widget_action(raw)
 
@@ -350,10 +367,12 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 if alt:
                     data = {**data, "results": alt}
 
-    products = data.get("results") if action == "search_products" and isinstance(data, dict) else None
+    products = data.get("results") if action in {"search_products", "get_recommendations"} and isinstance(data, dict) else None
     orders = None
     if action == "list_recent_orders" and isinstance(data, dict) and isinstance(data.get("orders"), list):
         orders = [{"id": o.get("order_number"), "status": o.get("status")} for o in data["orders"] if o.get("order_number")]
+    elif action == "get_my_orders" and isinstance(data, dict):
+        orders = (data.get("active_orders") or []) + (data.get("past_orders") or [])
 
     rag_query = original_message
     if action == "answer_policy_question" and entities.get("policy_type"):
@@ -418,6 +437,7 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
     ptype = pending["type"]
     language = pending.get("language", "en")
     asked = pending.get("asked", 1)
+    customer_id = _session_customer(shop, session_id)
 
     if ptype == "verify_email":
         email_match = EMAIL_RE.search(message)
@@ -426,14 +446,14 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
             # something else rather than answering; treat as a fresh request.
             return None
         entities = {**pending["entities"], "email": email_match.group(0)}
-        result = await _execute_and_reply(store, pending["intent"], pending["action"], entities, language, message, session_id)
+        result = await _execute_and_reply(store, pending["intent"], pending["action"], entities, language, message, session_id, customer_id=customer_id)
         _arm_verification_if_needed(key, pending["intent"], pending["action"], entities, language, result)
         _log(shop, message, result.get("status", "done"), pending["intent"], pending["action"], entities, result.get("reply", ""))
         return result
 
     if ptype == "await_search_item":
         term = extract_search_term(message) or message.strip()
-        result = await _execute_and_reply(store, "product_search", "search_products", {"query": term}, language, message, session_id)
+        result = await _execute_and_reply(store, "product_search", "search_products", {"query": term}, language, message, session_id, customer_id=customer_id)
         _log(shop, message, "done", "product_search", "search_products", {"query": term}, result["reply"])
         return result
 
@@ -441,7 +461,7 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         m = _ORDER_NO_RE.search(message)
         if m:
             entities = {"order_number": m.group(1)}
-            result = await _execute_and_reply(store, "order_tracking", "track_order", entities, language, message, session_id)
+            result = await _execute_and_reply(store, "order_tracking", "track_order", entities, language, message, session_id, customer_id=customer_id)
             _arm_verification_if_needed(key, "order_tracking", "track_order", entities, language, result)
             _log(shop, message, result.get("status", "done"), "order_tracking", "track_order", entities, result["reply"])
             return result
@@ -457,7 +477,7 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         # Removal is matched against the shopper's actual cart in the
         # browser (widget.js asks if it's ambiguous), so no catalog lookup.
         name = extract_search_term(message) or message.strip()
-        result = await _execute_and_reply(store, intent, action, {"product_name_or_id": name}, language, message, session_id)
+        result = await _execute_and_reply(store, intent, action, {"product_name_or_id": name}, language, message, session_id, customer_id=customer_id)
         _log(shop, message, "done", intent, action, {"product_name_or_id": name}, result["reply"])
         return result
 
@@ -506,6 +526,10 @@ async def chat(req: ChatRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    _remember_customer(req.shop, req.session_id, customer_id)
+    customer_profile = await customer_profiles.get_profile(req.shop, customer_id) if customer_id else None
+
     _prune_pending()
     key = _pkey(req.shop, req.session_id)
     pending = PENDING.get(key)
@@ -528,7 +552,7 @@ async def chat(req: ChatRequest):
     if pending is not None:
         text = message.lower().strip(" .!")
         if text in _AFFIRMATIVE:
-            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message, req.session_id)
+            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message, req.session_id, customer_id=customer_id)
             _arm_verification_if_needed(key, pending["intent"], pending["action"], pending["entities"], pending["language"], result)
             _log(req.shop, message, result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
             return result
@@ -639,7 +663,7 @@ async def chat(req: ChatRequest):
         return {"status": "confirmation_required", "reply": confirm_reply, "language": language}
 
     try:
-        result = await _execute_and_reply(store, intent, action, entities, language, message, req.session_id)
+        result = await _execute_and_reply(store, intent, action, entities, language, message, req.session_id, customer_id=customer_id)
         _arm_verification_if_needed(key, intent, action, entities, language, result)
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
         return result
@@ -661,6 +685,9 @@ async def confirm(req: ConfirmRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    _remember_customer(req.shop, req.session_id, customer_id)
+
     _prune_pending()
     pending = PENDING.pop(_pkey(req.shop, req.session_id), None)
     if not pending or pending.get("type", "confirm") != "confirm":
@@ -673,7 +700,7 @@ async def confirm(req: ConfirmRequest):
         return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
     try:
-        result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed", req.session_id)
+        result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed", req.session_id, customer_id=customer_id)
         _arm_verification_if_needed(_pkey(req.shop, req.session_id), pending["intent"], pending["action"], pending["entities"], pending["language"], result)
     except Exception as e:  # noqa: BLE001
         get_client().update_current_span(level="ERROR", status_message=str(e))
@@ -682,6 +709,38 @@ async def confirm(req: ConfirmRequest):
         return {"reply": "Sorry, something went wrong completing that. Please try again."}
     _log(req.shop, "confirmed=true", result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
     return result
+
+
+@router.get("/customer-session")
+async def customer_session(request: Request):
+    if not customer_profiles.verify_app_proxy(request.query_params.multi_items()):
+        return {"authenticated":False,"error":"invalid_app_proxy_signature"}
+    shop=request.query_params.get("shop","")
+    customer_id=request.query_params.get("logged_in_customer_id") or ""
+    if not shop or not customer_id: return {"authenticated":False,"shop":shop}
+    store=_get_store(shop)
+    if not store: return {"authenticated":False,"error":"unknown_store"}
+    token=customer_profiles.make_session_token(shop,customer_id)
+    profile=await customer_profiles.get_profile(shop,customer_id) or {}
+    customer=await shopify_actions.get_customer(store,customer_id)
+    if customer:
+        email=((customer.get("defaultEmailAddress") or {}).get("emailAddress")) or ""
+        fields={"first_name":customer.get("firstName") or "","last_name":customer.get("lastName") or "","email":email,"order_count":int(customer.get("numberOfOrders") or 0),"synced_at":int(time.time())}
+        # Refresh the lightweight purchase summary at most once per hour.
+        stale=(int(profile.get("synced_at") or 0) + 3600) < int(time.time())
+        if stale or not profile.get("purchased_product_ids"):
+            order_data=await shopify_actions.get_customer_orders(store,customer_id,first=50)
+            fields["purchased_product_ids"]=order_data.get("purchased_product_ids") or []
+            names=[]; variants=[]
+            for order in (order_data.get("active_orders") or [])+(order_data.get("past_orders") or []):
+                for item in order.get("items") or []:
+                    if item.get("name"): names.append(item["name"])
+                    if item.get("variant"): variants.append(item["variant"])
+            fields["top_types"]=list(dict.fromkeys(names))[:20]
+            fields["top_tags"]=list(dict.fromkeys(variants))[:20]
+        await customer_profiles.save_profile(shop,customer_id,fields)
+        profile={**profile,**fields}
+    return {"authenticated":True,"customer_id":str(customer_id),"customer_token":token,"first_name":(customer or {}).get("firstName") or profile.get("first_name") or "","profile":profile}
 
 
 @router.get("/widget-config")
@@ -697,6 +756,7 @@ async def widget_config(shop: str):
         "icon_type": cfg.get("icon_type", "preset"),
         "theme_color": cfg.get("theme_color", "#2b2b2b"),
         "custom_icon_url": cfg.get("custom_icon_url", ""),
+        "customer_session_path": os.environ.get("SHOPIFY_APP_PROXY_PATH", "/apps/ai-agent/customer-session"),
     }
 
 
@@ -722,7 +782,8 @@ WIDGET_JS = r"""
   var CFG = {
     chatEndpoint: ORIGIN + "/chat",
     confirmEndpoint: ORIGIN + "/confirm",
-    configEndpoint: ORIGIN + "/widget-config?shop=" + encodeURIComponent(SHOP)
+    configEndpoint: ORIGIN + "/widget-config?shop=" + encodeURIComponent(SHOP),
+    customerSessionPath: (THIS_SCRIPT && THIS_SCRIPT.dataset.proxyPath) || "/apps/ai-agent/customer-session"
   };
 
   if (!SHOP) { console.warn("[chat widget] missing data-shop attribute on script tag"); return; }
@@ -758,6 +819,14 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root #expandToggle.active-expand .icon-expand { display:none; }",
     "#ai-chat-widget-root #expandToggle.active-expand .icon-collapse { display:block; }",
     "#ai-chat-widget-root .history-divider { text-align:center; font-size:9.5px; color:#999; margin:6px 0; }",
+    "#ai-chat-widget-root .order-card { background:rgba(255,255,255,.88); border:1px solid rgba(0,0,0,.09); border-radius:10px; padding:9px; margin:5px 0; font-size:10.5px; color:#222; }",
+    "#ai-chat-widget-root .order-card-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }",
+    "#ai-chat-widget-root .order-status { font-size:9px; padding:3px 6px; border-radius:999px; background:#f1f1f1; }",
+    "#ai-chat-widget-root .order-meta { color:#777; margin-top:3px; }",
+    "#ai-chat-widget-root .order-items { margin-top:5px; line-height:1.35; }",
+    "#ai-chat-widget-root .order-total { margin-top:5px; font-weight:700; }",
+    "#ai-chat-widget-root .order-card a { display:inline-block; margin-top:6px; font-weight:600; color:#222; text-decoration:underline; }",
+
     "#ai-chat-widget-root .history-hint { position:relative; z-index:3; background:transparent !important; border:0; box-shadow:none; flex-shrink:0; text-align:center; font-size:10px; font-weight:500; letter-spacing:.2px; color:rgba(110,110,110,.55); padding:2px 0 4px; max-height:44px; overflow:hidden; cursor:pointer; user-select:none; -webkit-user-select:none; animation:hhFadeIn .6s ease .15s both; transition:transform .2s ease, opacity .3s ease, max-height .35s ease, padding .35s ease; }",
     "@keyframes hhFadeIn { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }",
     "#ai-chat-widget-root .history-hint .hh-arrow { display:block; width:7px; height:7px; margin:4px auto 0; border-right:1.5px solid rgba(120,120,120,.45); border-bottom:1.5px solid rgba(120,120,120,.45); background:transparent; transform:rotate(45deg); animation:hhBounce 1.4s ease-in-out infinite; }",
@@ -1161,6 +1230,8 @@ WIDGET_JS = r"""
       root.style.display = "";
       setTimeout(showFabGreeting, 800);
       if (!cfg || cfg.error) return;
+      if (cfg.customer_session_path) CFG.customerSessionPath = cfg.customer_session_path;
+      loadCustomerSession();
       headerName.textContent = cfg.agent_name || "AI Assistant";
       greetingBubble.textContent = greetingFor(cfg.agent_title);
 
@@ -1176,7 +1247,7 @@ WIDGET_JS = r"""
         headerAvatar.style.background = color;
       }
     })
-    .catch(function () { root.style.display = ""; setTimeout(showFabGreeting, 800); /* fall back to defaults already in the markup */ });
+    .catch(function () { loadCustomerSession(); root.style.display = ""; setTimeout(showFabGreeting, 800); /* fall back to defaults already in the markup */ });
 
   var SESSION_ID = (function () {
     try {
@@ -1190,6 +1261,29 @@ WIDGET_JS = r"""
       return "sess_" + Math.random().toString(36).slice(2) + Date.now();
     }
   })();
+
+  var CUSTOMER_TOKEN_KEY = "aiChatCustomerToken_" + SHOP;
+  var customerToken = null;
+  var customerAuthenticated = false;
+  try { customerToken = sessionStorage.getItem(CUSTOMER_TOKEN_KEY); } catch (e) {}
+
+  function loadCustomerSession() {
+    var url = CFG.customerSessionPath || "/apps/ai-agent/customer-session";
+    if (url.indexOf("http") !== 0) {
+      if (url.charAt(0) !== "/") url = "/" + url;
+      url += (url.indexOf("?") === -1 ? "?" : "&") + "_ai_session=" + Date.now();
+    }
+    return fetch(url, { credentials: "same-origin", cache: "no-store" })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data && data.authenticated && data.customer_token) {
+          customerToken=data.customer_token; customerAuthenticated=true;
+          try { sessionStorage.setItem(CUSTOMER_TOKEN_KEY,customerToken); } catch (e) {}
+          if (data.first_name) { shopperName=data.first_name; rememberShopperName(data.first_name); refreshGreetingBubble(); showFabGreeting(); }
+        } else { customerAuthenticated=false; try { sessionStorage.removeItem(CUSTOMER_TOKEN_KEY); } catch (e) {} }
+        return data;
+      }).catch(function () { return null; });
+  }
 
   // --------------------------------------------------------------------
   // Cross-page persistence: Shopify does a full page reload on nearly
@@ -1347,26 +1441,26 @@ WIDGET_JS = r"""
   // re-asks the same way the shopper would by typing the order number.
   // --------------------------------------------------------------------
   function addOrderPicker(orders, opts) {
-    opts = opts || {};
-    var row = document.createElement("div");
-    row.className = "quick-actions";
-    orders.forEach(function (o, i) {
-      var btn = document.createElement("button");
-      btn.className = "quick-action-btn";
-      var label = "#" + o.id;
-      if (o.date) label += " \u2014 " + o.date;
-      if (o.status) label += " (" + o.status + ")";
-      btn.textContent = label;
-      btn.addEventListener("click", function () {
-        Array.prototype.forEach.call(row.querySelectorAll("button"), function (b) { b.disabled = true; });
-        sendMessage("Track order #" + o.id);
+    opts=opts||{};
+    var active=orders.filter(function(o){return ["fulfilled","shipped","delivered"].indexOf(String(o.status||"").toLowerCase())===-1;});
+    var past=orders.filter(function(o){return active.indexOf(o)===-1;});
+    function renderGroup(title,list){
+      if(!list.length)return;
+      var heading=document.createElement("div"); heading.className="history-divider"; heading.textContent=title; conversation.appendChild(heading);
+      list.forEach(function(o){
+        var card=document.createElement("div"); card.className="order-card";
+        var top=document.createElement("div"); top.className="order-card-top";
+        var num=document.createElement("strong"); num.textContent="#"+(o.id||o.order_number||""); top.appendChild(num);
+        var st=document.createElement("span"); st.className="order-status"; st.textContent=o.status||"Unknown"; top.appendChild(st); card.appendChild(top);
+        if(o.date){var d=document.createElement("div");d.className="order-meta";d.textContent=o.date;card.appendChild(d);}
+        if(o.items&&o.items.length){var it=document.createElement("div");it.className="order-items";it.textContent=o.items.map(function(i){return (i.name||"Item")+" ×"+(i.quantity||1);}).join(", ");card.appendChild(it);}
+        if(o.total){var total=document.createElement("div");total.className="order-total";total.textContent=(o.currency||"")+" "+o.total;card.appendChild(total);}
+        if(o.tracking&&o.tracking.length){var tr=o.tracking.find(function(t){return t&&t.url;});if(tr){var a=document.createElement("a");a.href=tr.url;a.target="_blank";a.rel="noopener";a.textContent="Track shipment";card.appendChild(a);}}
+        conversation.appendChild(card);
       });
-      row.appendChild(btn);
-      setTimeout(function () { btn.classList.add("show"); autoResizeConversation(); }, i * 150);
-    });
-    conversation.appendChild(row);
-    autoResizeConversation();
-    if (opts.record !== false) { chatHistory.push({ type: "orders", orders: orders }); persistState(); }
+    }
+    renderGroup("Active Orders",active); renderGroup("Past Orders",past); autoResizeConversation();
+    if(opts.record!==false){chatHistory.push({type:"orders",orders:orders});persistState();}
   }
 
   function handleChatResponse(data) {
@@ -1397,7 +1491,7 @@ WIDGET_JS = r"""
         fetch(CFG.confirmEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed })
+          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed, customer_token: customerToken })
         })
           .then(function (res) { return res.json(); })
           .then(function (data) { typingEl.remove(); handleChatResponse(data); })
@@ -1675,7 +1769,7 @@ WIDGET_JS = r"""
     fetch(CFG.chatEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP })
+      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP, customer_token: customerToken })
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
