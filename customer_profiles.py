@@ -11,12 +11,10 @@ them between visits:
                             widget so every /chat call can be tied to the
                             verified customer. The browser can't forge it.
   3. get/save/delete_profile() - a small per-customer record in Appwrite
-                            (name, email, order count, what they've bought
-                            and which product types/tags they favour).
-
-Why not just put {{ customer.id }} in the theme? Anyone can edit the page
-in DevTools and claim to be another customer. The App Proxy signature is
-what makes the id trustworthy.
+                            (name, email, order count, purchases, favourite
+                            types/tags, recent searches, colours, budget).
+  4. record_interaction() - remembers what a logged-in shopper searched for
+                            so recommendations can use it.
 
 Env vars:
   SHOPIFY_API_SECRET             your app's Client Secret (signs app-proxy requests)
@@ -27,12 +25,14 @@ Env vars:
   APPWRITE_API_KEY               server key with databases.read/write
   APPWRITE_DATABASE_ID
   APPWRITE_CUSTOMERS_COLLECTION_ID   default: customer_profiles
-(Use the same Appwrite values your repository_appwrite.py already uses.)
 
-Storage talks to Appwrite's REST API directly (no SDK), so it doesn't
-depend on which Appwrite SDK version you have installed. If Appwrite
-isn't configured, every storage call quietly returns None/False and the
-rest of the app keeps working from live Shopify data.
+Appwrite collection `customer_profiles` attributes needed:
+  shop (string), customer_id (string), first_name (string), last_name (string),
+  email (string), order_count (int), synced_at (int),
+  purchased_product_ids (string, large), top_types (string), top_tags (string),
+  -- new --
+  recent_searches (string 4096), favorite_colors (string 1024),
+  last_seen (int), budget_min (int), budget_max (int)
 """
 
 import base64
@@ -55,10 +55,8 @@ APPWRITE_API_KEY = os.environ.get("APPWRITE_API_KEY", "")
 APPWRITE_DATABASE_ID = os.environ.get("APPWRITE_DATABASE_ID", "")
 CUSTOMERS_COLLECTION_ID = os.environ.get("APPWRITE_CUSTOMERS_COLLECTION_ID", "customer_profiles")
 
-_LIST_FIELDS = ("purchased_product_ids", "top_types", "top_tags")
-# The first implementation deliberately reuses the existing Appwrite attributes.
-# No new customer-profile fields are required.
-_INT_FIELDS = ("order_count", "synced_at")
+_LIST_FIELDS = ("purchased_product_ids", "top_types", "top_tags", "recent_searches", "favorite_colors")
+_INT_FIELDS = ("order_count", "synced_at", "last_seen", "budget_min", "budget_max")
 
 
 # ---------------------------------------------------------------------
@@ -232,3 +230,44 @@ async def delete_profile(shop: str, customer_id: str) -> bool:
         print(f"customer_profiles.delete_profile failed: {e!r}")
         return False
     return resp.status_code in (200, 204, 404)
+
+
+# ---------------------------------------------------------------------
+# 4. Recommendation signals
+# ---------------------------------------------------------------------
+def _merge_recent(old, new, cap):
+    out = [x for x in new if x]
+    for x in old or []:
+        if x not in out:
+            out.append(x)
+    return out[:cap]
+
+
+async def record_interaction(shop: str, customer_id: str, entities: dict, existing: dict | None = None) -> bool:
+    """Remembers what a logged-in shopper searched for, so recommendations
+    can use it. Best-effort: never raises."""
+    try:
+        if not customer_id or not entities:
+            return False
+        profile = existing if existing is not None else (await get_profile(shop, customer_id) or {})
+        fields: dict = {"last_seen": int(time.time())}
+
+        terms = [str(entities[k]).strip().lower() for k in ("query", "category") if entities.get(k)]
+        if terms:
+            fields["recent_searches"] = _merge_recent(profile.get("recent_searches"), terms, 20)
+        if entities.get("color"):
+            fields["favorite_colors"] = _merge_recent(
+                profile.get("favorite_colors"), [str(entities["color"]).strip().lower()], 10
+            )
+        for src, dst in (("price_min", "budget_min"), ("price_max", "budget_max")):
+            try:
+                if entities.get(src) not in (None, ""):
+                    fields[dst] = int(float(entities[src]))
+            except (TypeError, ValueError):
+                pass
+        if len(fields) == 1:  # nothing useful beyond last_seen
+            return False
+        return await save_profile(shop, customer_id, fields)
+    except Exception as e:  # noqa: BLE001
+        print(f"customer_profiles.record_interaction failed: {e!r}")
+        return False

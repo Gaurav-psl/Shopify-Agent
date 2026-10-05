@@ -47,7 +47,6 @@ Conversation state kept in PENDING (in-memory, 5 min TTL, per shop+session):
 import re
 import time
 import os
-import asyncio
 from types import SimpleNamespace
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
@@ -454,8 +453,6 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
 
     if ptype == "await_search_item":
         term = extract_search_term(message) or message.strip()
-        if customer_id:
-            asyncio.create_task(customer_profiles.record_interaction(shop, customer_id, {"query": term}))
         result = await _execute_and_reply(store, "product_search", "search_products", {"query": term}, language, message, session_id, customer_id=customer_id)
         _log(shop, message, "done", "product_search", "search_products", {"query": term}, result["reply"])
         return result
@@ -585,8 +582,6 @@ async def chat(req: ChatRequest):
         if m:
             entities["order_number"] = m.group(1)
     language = classification["language"]
-    if customer_id and intent == "product_search":
-        asyncio.create_task(customer_profiles.record_interaction(req.shop, customer_id, dict(entities), customer_profile))
 
     try:
         # --- One-tap checkout: not in intent_schema.json, so catch it when
@@ -956,7 +951,6 @@ WIDGET_JS = r"""
   // site's page told it or what the visitor told the widget directly.
   // --------------------------------------------------------------------
   var NAME_KEY = "aiChatShopperName_" + SHOP;
-  var ACCOUNT_NAME_KEY = "aiChatAccountName_" + SHOP;
 
   function getKnownShopperName() {
     var fromTag = THIS_SCRIPT && THIS_SCRIPT.dataset.userName;
@@ -1123,7 +1117,6 @@ WIDGET_JS = r"""
   // visits. Returns null if nothing changed (no name found, or it's the
   // same name we already had).
   function tryExtractNameFromMessage(text) {
-    if (customerAuthenticated) return null; // account name wins
     var candidate = extractNameCandidate(text);
     if (!candidate) return null;
     if (shopperName && candidate.toLowerCase() === shopperName.toLowerCase()) return null;
@@ -1284,26 +1277,10 @@ WIDGET_JS = r"""
       .then(function (res) { return res.json(); })
       .then(function (data) {
         if (data && data.authenticated && data.customer_token) {
-          customerToken = data.customer_token; customerAuthenticated = true;
-          try { sessionStorage.setItem(CUSTOMER_TOKEN_KEY, customerToken); } catch (e) {}
-          if (data.first_name) {
-            shopperName = data.first_name;
-            rememberShopperName(data.first_name);
-            try { localStorage.setItem(ACCOUNT_NAME_KEY, "1"); } catch (e) {}
-            refreshGreetingBubble(); showFabGreeting();
-          }
-        } else if (data && !data.error) {
-          // Server answered "not logged in" (not a network/signature error).
-          customerAuthenticated = false; customerToken = null;
-          try { sessionStorage.removeItem(CUSTOMER_TOKEN_KEY); } catch (e) {}
-          var wasAccountName = false;
-          try { wasAccountName = !!localStorage.getItem(ACCOUNT_NAME_KEY); } catch (e) {}
-          if (wasAccountName) {  // they logged out: forget the account's name
-            shopperName = null;
-            try { localStorage.removeItem(NAME_KEY); localStorage.removeItem(ACCOUNT_NAME_KEY); localStorage.removeItem(PROFILE_KEY); } catch (e) {}
-            refreshGreetingBubble(); hideFabGreeting();
-          }
-        }
+          customerToken=data.customer_token; customerAuthenticated=true;
+          try { sessionStorage.setItem(CUSTOMER_TOKEN_KEY,customerToken); } catch (e) {}
+          if (data.first_name) { shopperName=data.first_name; rememberShopperName(data.first_name); refreshGreetingBubble(); showFabGreeting(); }
+        } else { customerAuthenticated=false; try { sessionStorage.removeItem(CUSTOMER_TOKEN_KEY); } catch (e) {} }
         return data;
       }).catch(function () { return null; });
   }
