@@ -1,23 +1,50 @@
 """
 Shopify data layer — one function per action defined in intent_schema.json.
 
-Every function now calls the REAL Shopify Admin API using the access
-token stored for that store during OAuth (models.Store.access_token —
-see shopify_auth.py). Functions take a `Store` ORM object (not just a
-shop string) so they always have the token, and return a plain dict —
-that dict becomes the "source of truth" data reply_generator.py turns
-into a natural-language reply in the shopper's own language.
+Every function calls the REAL Shopify Admin API using the access token
+stored for that store during OAuth (models.Store.access_token — see
+shopify_auth.py). Functions take a `Store` ORM object (not just a shop
+string) so they always have the token, and return a plain dict — that
+dict becomes the "source of truth" data reply_generator.py turns into
+a natural-language reply in the shopper's own language.
 
-Two kinds of actions need special handling, because a shopper's cart
-is a *browser-side, cookie-based* concept — the Admin API cannot add
-to "a shopper's cart" on the server. So cart actions return a small
-`widget_action` instruction instead of doing the mutation themselves.
-chatbot_widget.py strips this out of the data before it reaches the
-LLM reply generator and sends it to the widget separately; widget.js
-then performs the actual `fetch('/cart/add.js', ...)` call itself,
-from the shopper's own browser — which works because the widget
-script is embedded on the store's own domain, so it's same-origin
-with the store's cart.
+Cart actions run entirely server-side via Shopify's Storefront API
+(cartCreate / cartLinesAdd / cartLinesUpdate / cartLinesRemove), using a
+per-store Storefront API access token fetched (or created, on first use)
+through the Admin API — not the shopper's browser. This is a deliberate
+architecture choice with one real tradeoff: a Storefront API cart is a
+*separate* cart object from the storefront theme's own cookie-based
+cart. It has its own `checkoutUrl`, and it will not appear if a shopper
+independently opens the theme's native cart drawer/page — the widget's
+own cart badge and "what's in my cart" replies are the only place this
+cart is visible, and checkout must go through the `checkout_url` this
+module returns rather than the store's normal /cart or /checkout URLs.
+
+Each store's Storefront cart is tracked per chat session (in memory,
+session_id -> cart GID — see _SESSION_CARTS below), not per shopper
+account, since the widget has no concept of a logged-in customer.
+
+Order-related lookups (track_order, list_recent_orders, submit_claim,
+check_claim_status) require the shopper to confirm the email address
+on file for that order before any details are returned or any claim is
+filed/checked. Without this, an order number alone — something a
+shopper could guess, reuse from their own past order, or see on a
+packing slip — would let them pull up *any* customer's order status
+and tracking info. If no email is given, or it doesn't match Shopify's
+own record for that order, these functions return a
+"verification_required"/"verification_failed" error dict instead of
+data; chatbot_widget.py's PENDING mechanism (mode="verify_email")
+keeps the original request alive across that follow-up turn, so the
+shopper only needs to reply with an email rather than repeat the whole
+request.
+
+track_order also reports a live shipment location/status (current
+city, last scan message, estimated delivery) on top of Shopify's own
+fulfillment data, via tracking_provider.py (AfterShip). Shopify itself
+only ever stores a tracking number and a link to the carrier's site —
+it has no idea where a package actually is. This is additive and
+optional: if AFTERSHIP_API_KEY isn't configured, track_order still
+works exactly as before, just without the live-location fields.
 
 SHOPIFY_API_VERSION: bump this as Shopify deprecates old ones.
 """
@@ -25,6 +52,8 @@ SHOPIFY_API_VERSION: bump this as Shopify deprecates old ones.
 import os
 import re
 import httpx
+
+import tracking_provider
 
 SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2024-10")
 
@@ -57,9 +86,177 @@ async def _put(store, path: str, json: dict) -> httpx.Response:
 
 
 # ==========================================================================
+# Storefront API — cart engine
+#
+# In-memory caches. Both are cheap to lose on a restart: a missing
+# Storefront token just gets re-fetched/re-created on the next cart
+# action; a missing session->cart mapping just means that session starts
+# a fresh, empty cart rather than erroring. Same volatility tradeoff
+# already accepted for chatbot_widget.py's PENDING confirmation dict.
+# For production durability across restarts, consider persisting both
+# to Appwrite instead (mirrors how rag_retriever.py flags its own
+# STORE_DATASET_MAP as a stand-in for a real Appwrite-backed mapping).
+# ==========================================================================
+
+_STOREFRONT_TOKENS: dict[str, str] = {}   # shop_domain -> storefront access token
+_SESSION_CARTS: dict[str, str] = {}       # session_id  -> Storefront API cart GID
+_STOREFRONT_TOKEN_TITLE = "AI Shopping Assistant"
+
+_CART_FIELDS = """
+    id
+    checkoutUrl
+    totalQuantity
+    cost { totalAmount { amount currencyCode } }
+    lines(first: 50) {
+      edges {
+        node {
+          id
+          quantity
+          merchandise {
+            ... on ProductVariant {
+              id
+              title
+              product { title }
+              price { amount currencyCode }
+            }
+          }
+        }
+      }
+    }
+"""
+
+
+async def _get_storefront_token(store) -> str | None:
+    """Fetches an existing Storefront API access token for this store via
+    the Admin API, or creates one if none exists yet. Cached in memory
+    per shop after the first lookup."""
+    cached = _STOREFRONT_TOKENS.get(store.shop_domain)
+    if cached:
+        return cached
+
+    resp = await _get(store, "storefront_access_tokens.json")
+    if resp.status_code == 200:
+        for tok in resp.json().get("storefront_access_tokens", []):
+            token = tok.get("access_token")
+            if token:
+                _STOREFRONT_TOKENS[store.shop_domain] = token
+                return token
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        create_resp = await client.post(
+            _url(store, "storefront_access_tokens.json"),
+            headers=_headers(store),
+            json={"storefront_access_token": {"title": _STOREFRONT_TOKEN_TITLE}},
+        )
+    if create_resp.status_code not in (200, 201):
+        return None
+
+    token = create_resp.json().get("storefront_access_token", {}).get("access_token")
+    if token:
+        _STOREFRONT_TOKENS[store.shop_domain] = token
+    return token
+
+
+def _storefront_url(store) -> str:
+    return f"https://{store.shop_domain}/api/{SHOPIFY_API_VERSION}/graphql.json"
+
+
+async def _storefront_query(store, query: str, variables: dict) -> dict | None:
+    token = await _get_storefront_token(store)
+    if not token:
+        return None
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            _storefront_url(store),
+            headers={"X-Shopify-Storefront-Access-Token": token, "Content-Type": "application/json"},
+            json={"query": query, "variables": variables},
+        )
+    if resp.status_code != 200:
+        return None
+    body = resp.json()
+    if body.get("errors"):
+        return None
+    return body.get("data")
+
+
+def _summarize_cart(cart: dict | None) -> dict:
+    """Turns a Storefront API cart node into the plain-dict shape both
+    reply_generator.py and widget.js consume."""
+    if not cart:
+        return {"items": [], "item_count": 0, "total": "0.00", "currency": None, "checkout_url": None}
+
+    items = []
+    for edge in cart.get("lines", {}).get("edges", []):
+        line = edge["node"]
+        merch = line.get("merchandise", {}) or {}
+        price = merch.get("price", {}) or {}
+        items.append({
+            "line_id": line["id"],
+            "name": (merch.get("product") or {}).get("title") or merch.get("title") or "Item",
+            "variant": merch.get("title"),
+            "quantity": line["quantity"],
+            "price": price.get("amount"),
+        })
+
+    cost = (cart.get("cost") or {}).get("totalAmount") or {}
+    return {
+        "items": items,
+        "item_count": cart.get("totalQuantity", 0),
+        "total": cost.get("amount"),
+        "currency": cost.get("currencyCode"),
+        "checkout_url": cart.get("checkoutUrl"),
+    }
+
+
+def _find_line(cart_summary: dict, product_query: str) -> dict | None:
+    needle = (product_query or "").strip().lower()
+    if not needle:
+        return None
+    for item in cart_summary["items"]:
+        if needle in item["name"].lower():
+            return item
+    return None
+
+
+async def _fetch_cart(store, cart_id: str) -> dict | None:
+    query = f"query getCart($id: ID!) {{ cart(id: $id) {{ {_CART_FIELDS} }} }}"
+    data = await _storefront_query(store, query, {"id": cart_id})
+    return (data or {}).get("cart")
+
+
+async def _create_cart(store) -> dict | None:
+    mutation = f"""
+    mutation createCart {{
+      cartCreate {{
+        cart {{ {_CART_FIELDS} }}
+        userErrors {{ field message }}
+      }}
+    }}
+    """
+    data = await _storefront_query(store, mutation, {})
+    result = (data or {}).get("cartCreate") or {}
+    if result.get("userErrors"):
+        return None
+    return result.get("cart")
+
+
+async def _get_or_create_cart(store, session_id: str) -> dict | None:
+    cart_id = _SESSION_CARTS.get(session_id)
+    cart = await _fetch_cart(store, cart_id) if cart_id else None
+    if cart is None:
+        cart = await _create_cart(store)
+        if cart:
+            _SESSION_CARTS[session_id] = cart["id"]
+    return cart
+
+
+# ==========================================================================
 # registration_login — shoppers use the store's own native account pages
 # (Shopify handles customer auth itself; there is no Admin API endpoint
-# for "log a shopper in"). We just point the widget at the right page.
+# for "log a shopper in"). We just point the widget at the right page —
+# this is the one remaining case where a `widget_action` (a same-tab
+# redirect) is still needed, since it's not something the server can do
+# on the shopper's behalf.
 # ==========================================================================
 def _account_redirect(store, page: str, message: str) -> dict:
     return {
@@ -69,29 +266,37 @@ def _account_redirect(store, page: str, message: str) -> dict:
     }
 
 
-async def register(store, entities: dict) -> dict:
+async def register(store, entities: dict, session_id: str) -> dict:
     return _account_redirect(store, "register", "Taking you to the account creation page.")
 
 
-async def login(store, entities: dict) -> dict:
+async def login(store, entities: dict, session_id: str) -> dict:
     return _account_redirect(store, "login", "Taking you to the sign-in page.")
 
 
-async def logout(store, entities: dict) -> dict:
+async def logout(store, entities: dict, session_id: str) -> dict:
     return _account_redirect(store, "logout", "Signing you out.")
 
 
-async def forgot_password(store, entities: dict) -> dict:
+async def forgot_password(store, entities: dict, session_id: str) -> dict:
     return _account_redirect(store, "login#recover", "Taking you to the password recovery page.")
 
 
 # ==========================================================================
 # order_tracking
 # ==========================================================================
-async def track_order(store, entities: dict) -> dict:
+async def track_order(store, entities: dict, session_id: str) -> dict:
     order_number = _extract_order_number(entities)
     if not order_number:
         return {"error": "missing_order_number", "message": "No order number was given."}
+
+    email = (entities.get("email") or "").strip().lower()
+    if not email:
+        return {
+            "error": "verification_required",
+            "order_number": order_number,
+            "message": "For privacy, please confirm the email address used on this order before it can be looked up.",
+        }
 
     resp = await _get(store, "orders.json", {"name": f"#{order_number}", "status": "any"})
     if resp.status_code != 200:
@@ -102,28 +307,68 @@ async def track_order(store, entities: dict) -> dict:
         return {"error": "not_found", "order_number": order_number}
 
     order = orders[0]
-    tracking_number, tracking_url = None, None
+    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
+    if not order_email or order_email != email:
+        return {
+            "error": "verification_failed",
+            "order_number": order_number,
+            "message": "That email doesn't match our records for this order. Order details can only be shared with the email on file.",
+        }
+
+    tracking_number, tracking_url, native_shipment_status = None, None, None
     for f in order.get("fulfillments", []):
         if f.get("tracking_number"):
             tracking_number = f["tracking_number"]
             tracking_url = f.get("tracking_url")
+            # Free, no extra API call: Shopify includes this on the same
+            # fulfillment object for its own list of integrated carriers
+            # (see the Shipping Carriers help page) — coarse status only
+            # (in_transit/out_for_delivery/delivered/etc.), never a
+            # physical location.
+            native_shipment_status = f.get("shipment_status")
             break
 
-    return {
+    result = {
         "order_number": order_number,
         "fulfillment_status": order.get("fulfillment_status") or "unfulfilled",
         "financial_status": order.get("financial_status", "unknown"),
         "tracking_number": tracking_number,
         "tracking_url": tracking_url,
+        "shipment_status": native_shipment_status,
+        "current_location": None,
+        "last_scan_message": None,
+        "last_scan_time": None,
+        "estimated_delivery": None,
     }
 
+    # AfterShip is the primary source for a real physical location and a
+    # genuine estimated-delivery date — Shopify's own API never provides
+    # either. If AfterShip has usable data, it overrides the coarse
+    # native status above with something more specific; if it has
+    # nothing yet (not configured, carrier not recognized, or too soon
+    # after the label was created), the native status above is already
+    # in `result` as a free fallback rather than leaving the field empty.
+    if tracking_number:
+        live = await tracking_provider.get_live_status(tracking_number)
+        if live and (live.get("location") or live.get("status") or live.get("estimated_delivery")):
+            result["shipment_status"] = live.get("status") or native_shipment_status
+            result["current_location"] = live.get("location")
+            result["last_scan_message"] = live.get("message")
+            result["last_scan_time"] = live.get("checkpoint_time")
+            result["estimated_delivery"] = live.get("estimated_delivery")
 
-async def list_recent_orders(store, entities: dict) -> dict:
-    params = {"status": "any", "limit": 5, "order": "created_at desc"}
-    if entities.get("email"):
-        params["email"] = entities["email"]
+    return result
 
-    resp = await _get(store, "orders.json", params)
+
+async def list_recent_orders(store, entities: dict, session_id: str) -> dict:
+    email = (entities.get("email") or "").strip().lower()
+    if not email:
+        return {
+            "error": "verification_required",
+            "message": "Please share the email address on your account so recent orders can be looked up.",
+        }
+
+    resp = await _get(store, "orders.json", {"status": "any", "limit": 5, "order": "created_at desc", "email": email})
     if resp.status_code != 200:
         return {"error": "lookup_failed", "message": "Could not reach Shopify to look up orders."}
 
@@ -142,8 +387,10 @@ async def list_recent_orders(store, entities: dict) -> dict:
 
 
 # ==========================================================================
-# cart_management — resolve the product server-side (Admin API), then
-# hand the *action* off to the browser, which owns the real cart.
+# cart_management — resolved server-side end to end: the product lookup
+# uses the Admin API (as before), and the cart mutation itself now uses
+# the Storefront API cart tied to this chat session (see _get_or_create_cart
+# above). Nothing here is visible in the shopper's browser network tab.
 # ==========================================================================
 async def _resolve_variant(store, product_query: str) -> dict | None:
     if not product_query:
@@ -165,46 +412,129 @@ async def _resolve_variant(store, product_query: str) -> dict | None:
     }
 
 
-async def add_item(store, entities: dict) -> dict:
+async def add_item(store, entities: dict, session_id: str) -> dict:
     query = entities.get("product_name_or_id", "")
     match = await _resolve_variant(store, query)
-    if not match:
+    if not match or not match.get("variant_id"):
         return {"error": "not_found", "query": query}
 
     quantity = int(entities.get("quantity") or 1)
-    return {
-        "added": match["name"],
-        "quantity": quantity,
-        "widget_action": {"type": "cart_add", "variant_id": match["variant_id"], "quantity": quantity},
-    }
+    cart = await _get_or_create_cart(store, session_id)
+    if not cart:
+        return {"error": "cart_unavailable", "query": query}
+
+    mutation = f"""
+    mutation addLine($cartId: ID!, $lines: [CartLineInput!]!) {{
+      cartLinesAdd(cartId: $cartId, lines: $lines) {{
+        cart {{ {_CART_FIELDS} }}
+        userErrors {{ field message }}
+      }}
+    }}
+    """
+    data = await _storefront_query(store, mutation, {
+        "cartId": cart["id"],
+        "lines": [{"merchandiseId": f"gid://shopify/ProductVariant/{match['variant_id']}", "quantity": quantity}],
+    })
+    result = (data or {}).get("cartLinesAdd") or {}
+    if result.get("userErrors"):
+        return {"error": "cart_update_failed", "details": result["userErrors"], "query": query}
+
+    return {"added": match["name"], "quantity": quantity, "cart": _summarize_cart(result.get("cart") or cart)}
 
 
-async def remove_item(store, entities: dict) -> dict:
+async def remove_item(store, entities: dict, session_id: str) -> dict:
     query = entities.get("product_name_or_id", "")
-    return {
-        "removed": query,
-        "widget_action": {"type": "cart_remove", "product_name": query},
-    }
+    cart_id = _SESSION_CARTS.get(session_id)
+    if not cart_id:
+        return {"removed": None, "message": "Your cart is already empty."}
+
+    cart = await _fetch_cart(store, cart_id)
+    summary = _summarize_cart(cart)
+    line = _find_line(summary, query)
+    if not line:
+        return {"error": "not_found", "query": query, "cart": summary}
+
+    mutation = f"""
+    mutation removeLine($cartId: ID!, $lineIds: [ID!]!) {{
+      cartLinesRemove(cartId: $cartId, lineIds: $lineIds) {{
+        cart {{ {_CART_FIELDS} }}
+        userErrors {{ field message }}
+      }}
+    }}
+    """
+    data = await _storefront_query(store, mutation, {"cartId": cart_id, "lineIds": [line["line_id"]]})
+    result = (data or {}).get("cartLinesRemove") or {}
+    if result.get("userErrors"):
+        return {"error": "cart_update_failed", "details": result["userErrors"], "query": query}
+
+    return {"removed": line["name"], "cart": _summarize_cart(result.get("cart"))}
 
 
-async def edit_quantity(store, entities: dict) -> dict:
+async def edit_quantity(store, entities: dict, session_id: str) -> dict:
     query = entities.get("product_name_or_id", "")
     quantity = int(entities.get("quantity") or 1)
-    return {
-        "item": query,
-        "new_quantity": quantity,
-        "widget_action": {"type": "cart_set_quantity", "product_name": query, "quantity": quantity},
-    }
+    cart_id = _SESSION_CARTS.get(session_id)
+    if not cart_id:
+        return {"error": "not_found", "query": query}
+
+    cart = await _fetch_cart(store, cart_id)
+    summary = _summarize_cart(cart)
+    line = _find_line(summary, query)
+    if not line:
+        return {"error": "not_found", "query": query, "cart": summary}
+
+    mutation = f"""
+    mutation updateLine($cartId: ID!, $lines: [CartLineUpdateInput!]!) {{
+      cartLinesUpdate(cartId: $cartId, lines: $lines) {{
+        cart {{ {_CART_FIELDS} }}
+        userErrors {{ field message }}
+      }}
+    }}
+    """
+    data = await _storefront_query(store, mutation, {
+        "cartId": cart_id,
+        "lines": [{"id": line["line_id"], "quantity": quantity}],
+    })
+    result = (data or {}).get("cartLinesUpdate") or {}
+    if result.get("userErrors"):
+        return {"error": "cart_update_failed", "details": result["userErrors"], "query": query}
+
+    return {"item": query, "new_quantity": quantity, "cart": _summarize_cart(result.get("cart"))}
 
 
-async def view_cart(store, entities: dict) -> dict:
-    # The widget fetches /cart.js itself (same-origin, has the real cart
-    # cookie) and renders the summary — the backend can't see it.
-    return {"widget_action": {"type": "cart_view"}}
+async def view_cart(store, entities: dict, session_id: str) -> dict:
+    cart_id = _SESSION_CARTS.get(session_id)
+    if not cart_id:
+        return {"cart": _summarize_cart(None)}
+    cart = await _fetch_cart(store, cart_id)
+    return {"cart": _summarize_cart(cart)}
 
 
-async def clear_cart(store, entities: dict) -> dict:
-    return {"widget_action": {"type": "cart_clear"}}
+async def clear_cart(store, entities: dict, session_id: str) -> dict:
+    cart_id = _SESSION_CARTS.get(session_id)
+    if not cart_id:
+        return {"cart": _summarize_cart(None)}
+
+    cart = await _fetch_cart(store, cart_id)
+    summary = _summarize_cart(cart)
+    line_ids = [item["line_id"] for item in summary["items"]]
+    if not line_ids:
+        return {"cart": summary}
+
+    mutation = f"""
+    mutation clearCart($cartId: ID!, $lineIds: [ID!]!) {{
+      cartLinesRemove(cartId: $cartId, lineIds: $lineIds) {{
+        cart {{ {_CART_FIELDS} }}
+        userErrors {{ field message }}
+      }}
+    }}
+    """
+    data = await _storefront_query(store, mutation, {"cartId": cart_id, "lineIds": line_ids})
+    result = (data or {}).get("cartLinesRemove") or {}
+    if result.get("userErrors"):
+        return {"error": "cart_update_failed", "details": result["userErrors"]}
+
+    return {"cart": _summarize_cart(result.get("cart"))}
 
 
 # ==========================================================================
@@ -212,17 +542,33 @@ async def clear_cart(store, entities: dict) -> dict:
 # it as an order tag + note that shows up for the merchant in Admin.
 # Swap this for a real helpdesk (Gorgias/Zendesk) API call if you have one.
 # ==========================================================================
-async def submit_claim(store, entities: dict) -> dict:
+async def submit_claim(store, entities: dict, session_id: str) -> dict:
     order_number = _extract_order_number(entities)
     issue = entities.get("issue_description", "Not specified")
     if not order_number:
         return {"error": "missing_order_number"}
+
+    email = (entities.get("email") or "").strip().lower()
+    if not email:
+        return {
+            "error": "verification_required",
+            "order_number": order_number,
+            "message": "For privacy, please confirm the email address used on this order before filing a claim.",
+        }
 
     resp = await _get(store, "orders.json", {"name": f"#{order_number}", "status": "any"})
     if resp.status_code != 200 or not resp.json().get("orders"):
         return {"error": "not_found", "order_number": order_number}
 
     order = resp.json()["orders"][0]
+    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
+    if not order_email or order_email != email:
+        return {
+            "error": "verification_failed",
+            "order_number": order_number,
+            "message": "That email doesn't match our records for this order.",
+        }
+
     existing_tags = order.get("tags", "")
     new_tags = ", ".join(filter(None, [existing_tags, "warranty-claim"]))
     existing_note = order.get("note") or ""
@@ -233,16 +579,32 @@ async def submit_claim(store, entities: dict) -> dict:
     return {"status": "submitted", "order_number": order_number, "issue": issue}
 
 
-async def check_claim_status(store, entities: dict) -> dict:
+async def check_claim_status(store, entities: dict, session_id: str) -> dict:
     order_number = _extract_order_number(entities)
     if not order_number:
         return {"error": "missing_order_number"}
+
+    email = (entities.get("email") or "").strip().lower()
+    if not email:
+        return {
+            "error": "verification_required",
+            "order_number": order_number,
+            "message": "For privacy, please confirm the email address used on this order before checking claim status.",
+        }
 
     resp = await _get(store, "orders.json", {"name": f"#{order_number}", "status": "any"})
     if resp.status_code != 200 or not resp.json().get("orders"):
         return {"error": "not_found", "order_number": order_number}
 
     order = resp.json()["orders"][0]
+    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
+    if not order_email or order_email != email:
+        return {
+            "error": "verification_failed",
+            "order_number": order_number,
+            "message": "That email doesn't match our records for this order.",
+        }
+
     tags = order.get("tags", "")
     if "warranty-claim" in tags:
         return {"order_number": order_number, "status": "under review", "note": order.get("note", "")}
@@ -252,7 +614,7 @@ async def check_claim_status(store, entities: dict) -> dict:
 # ==========================================================================
 # product_search
 # ==========================================================================
-async def search_products(store, entities: dict) -> dict:
+async def search_products(store, entities: dict, session_id: str) -> dict:
     params = {"status": "active", "limit": 10}
     query = entities.get("query") or entities.get("category")
     if query:
@@ -304,7 +666,7 @@ _POLICY_FIELD_MAP = {
 }
 
 
-async def answer_policy_question(store, entities: dict) -> dict:
+async def answer_policy_question(store, entities: dict, session_id: str) -> dict:
     policy_type = entities.get("policy_type", "refund_policy")
 
     resp = await _get(store, "policies.json")
@@ -328,7 +690,7 @@ async def answer_policy_question(store, entities: dict) -> dict:
 # ==========================================================================
 # fallback
 # ==========================================================================
-async def clarify(store, entities: dict) -> dict:
+async def clarify(store, entities: dict, session_id: str) -> dict:
     return {"message": "Could not confidently match this to a supported action."}
 
 
@@ -354,9 +716,9 @@ ACTION_MAP = {
 }
 
 
-async def dispatch(intent: str, action: str, store, entities: dict) -> dict:
+async def dispatch(intent: str, action: str, store, entities: dict, session_id: str) -> dict:
     key = f"{intent}.{action}"
     fn = ACTION_MAP.get(key)
     if fn is None:
         return {"error": f"No handler registered for {key}"}
-    return await fn(store, entities)
+    return await fn(store, entities, session_id)
