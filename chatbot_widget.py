@@ -363,7 +363,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     reply = _safe_reply(
         action, _llm_view(data), language, original_message, fallback,
         store_identifier=store.shop_domain,
-        needs_rag=(action == "answer_policy_question"),
+        needs_rag=(action == "answer_policy_question" or action == "search_products"),
         rag_query=rag_query,
     )
     out = {"status": "done", "reply": reply, "language": language, "intent": intent, "action": action}
