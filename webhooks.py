@@ -21,6 +21,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
 import repository_appwrite as repo
+import customer_profiles
+import json
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -65,6 +67,14 @@ async def customers_redact(request: Request):
     body = await _verify(request)
     if body is None:
         return PlainTextResponse("Invalid HMAC", status_code=401)
+    shop=request.headers.get("X-Shopify-Shop-Domain") or ""
+    try:
+        payload=json.loads(body or b"{}")
+        customer_id=(payload.get("customer") or {}).get("id")
+        if shop and customer_id:
+            await customer_profiles.delete_profile(shop,str(customer_id))
+    except Exception as e:
+        print(f"webhooks: customer redact failed: {e!r}")
     return PlainTextResponse("ok")
 
 
