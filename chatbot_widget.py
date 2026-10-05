@@ -42,12 +42,6 @@ Conversation state kept in PENDING (in-memory, 5 min TTL, per shop+session):
   await_item         -> "which item would you like to add to your cart?"
   await_remove_item  -> "which item would you like to remove?"
   await_order_number -> "what's your order number?"
-  await_more         -> an item was just added; a bare follow-up item name
-                        ("and the mug") is added straight away too
-
-Adding to the cart: whatever item(s) the shopper names are added STRAIGHT
-to the cart — no yes/no. One message can name several ("tee, 2 mugs and a
-tote"); they go to the browser as ONE cart_add widget_action with `items`.
 """
 
 import re
@@ -94,21 +88,6 @@ _FEATURE_FOR_ACTION = {
     ("order_tracking", "list_recent_orders"): "track_orders",
 }
 _FILTER_ENTITIES = ("price_min", "price_max", "color", "size")
-
-# Passed to the reply generator with every reply so the assistant sounds like
-# a friendly, talkative shop assistant (reply_generator.py itself is untouched;
-# it already honours extra hints such as "instruction" inside `data`).
-_CHATTY_STYLE = (
-    "Write like a warm, talkative shop assistant: friendly and conversational, 1-3 short sentences, "
-    "an occasional emoji, and when it fits end with a light follow-up question or offer. "
-    "Never begin with \"I'd like to\"."
-)
-
-# Messages that are clearly a different request, so the "anything else to add?"
-# state never swallows them as item names.
-_OTHER_INTENT = re.compile(
-    r"\b(show|search|find|track|warrant\w*|remove|delete|checkout|check out|order|cart|under|what|"
-    r"do you have|recommend|browse|view|status|help|thanks|thank you|bye)\b")
 
 
 def _pkey(shop: str, session_id: str) -> str:
@@ -178,8 +157,6 @@ def _safe_reply(action: str, data: dict, language: str, message: str, fallback: 
     """generate_reply() that can never take the chat down: if the LLM call
     fails, the shopper still gets a sensible plain-English line (the
     widget_action / product cards that accompany it still work)."""
-    if isinstance(data, dict):
-        data = {**data, "style": _CHATTY_STYLE}
     try:
         return generate_reply(action, data, language, message, **kwargs) or fallback
     except Exception as e:  # noqa: BLE001
@@ -227,6 +204,17 @@ _LEADING_ARTICLE = re.compile(r"^\s*(a|an|the)\s+")
 _CHECKOUT_RE = re.compile(r"\b(check ?out|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
 _ORDER_NO_RE = re.compile(r"#?\s*(\d{3,})")
 
+# Order/claim lookups (track_order, list_recent_orders, submit_claim,
+# check_claim_status in shopify_actions.py) require the shopper to
+# confirm the email on file before any details are returned — otherwise
+# anyone could pull up anyone else's order just by knowing a number.
+# When dispatch() comes back needing that, we park the original request
+# here (type="verify_email", handled in _handle_followup below) so the
+# shopper's next message — just an email, nothing else — completes it
+# instead of being classified fresh and losing the order number/context.
+EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")
+_VERIFY_ERRORS = {"verification_required", "verification_failed"}
+
 
 def extract_search_term(message: str) -> str:
     """Strips request-phrasing scaffolding ('search for', 'show me', 'do
@@ -242,30 +230,9 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower())
 
 
-# Everyday words -> the word that actually appears in product titles. Extend
-# this list as your catalog grows ("hoodie" -> "sweatshirt", ...).
-SEARCH_ALIASES = {
-    "tshirt": "tee", "t-shirt": "tee", "tshirts": "tee", "shirt": "tee", "shirts": "tee",
-    "cup": "mug", "cups": "mug", "bag": "tote", "bags": "tote",
-    "blanket": "throw", "blankets": "throw", "soap": "soap", "matches": "match",
-}
-
-# Words with no product meaning. Without this a phrase such as "I'd like to
-# add an item" would match any title that merely starts with "to" / "it".
-_FILLER_WORDS = {
-    "id", "ill", "im", "ive", "like", "want", "wanna", "need", "would", "could", "can", "you", "your",
-    "please", "pls", "to", "an", "the", "my", "me", "some", "any", "of", "for", "and", "or", "is", "are",
-    "in", "on", "at", "it", "this", "that", "item", "items", "thing", "something", "product", "products",
-    "do", "does", "have", "has", "got", "get", "buy", "looking", "look", "find", "show", "give", "see",
-    "add", "cart", "one", "with", "from", "no", "yes", "ok", "okay", "hi", "hey", "hello",
-}
-
-
 def _term_variants(word: str) -> set:
-    """One search word -> forms to look for: itself, its singular, and any
-    SEARCH_ALIASES mapping ("shirt" / "tshirt" -> "tee")."""
     singular = word[:-1] if word.endswith("s") and len(word) > 3 else word
-    return {v for v in (word, singular, SEARCH_ALIASES.get(word), SEARCH_ALIASES.get(singular)) if v}
+    return {word, singular}
 
 
 def _product_card(p: dict, store) -> dict:
@@ -287,10 +254,13 @@ def _product_card(p: dict, store) -> dict:
     return card
 
 
-async def _fetch_catalog(store) -> list[dict] | None:
-    """The store's active products (one Admin API call), or None if Shopify
-    couldn't be reached. Callers that need several lookups fetch ONCE and
-    pass the list in."""
+async def _catalog_search(store, term: str, limit: int = 6) -> list[dict] | None:
+    """Forgiving product search over the live catalog. Returns a list of
+    product cards (best matches only), [] when nothing matches, or None
+    when there's nothing to search for / Shopify couldn't be reached."""
+    words = [w for w in _words(extract_search_term(term) or term) if len(w) >= 2]
+    if not words:
+        return None
     try:
         resp = await shopify_actions._get(store, "products.json", {"status": "active", "limit": 250})
     except Exception as e:  # noqa: BLE001
@@ -298,49 +268,26 @@ async def _fetch_catalog(store) -> list[dict] | None:
         return None
     if resp.status_code != 200:
         return None
-    return resp.json().get("products", [])
 
-
-def _match_products(products: list[dict], term: str, store, limit: int = 6) -> list[dict]:
-    """Forgiving title/type/tag match: each word of `term` (aliases and
-    singulars included) may match the START of a word in the product; the
-    products matching the MOST words win. [] when nothing matches."""
-    cleaned = extract_search_term(term) or term
-    words = [w for w in _words(cleaned) if len(w) >= 2 and w not in _FILLER_WORDS]
-    if not words:
-        return []
-    joined = "".join(_words(cleaned))  # "t-shirt" / "t shirt" -> "tshirt"
-    variant_sets = [_term_variants(w) for w in words] + ([_term_variants(joined)] if len(words) > 1 or joined != words[0] else [])
     scored = []
-    for p in products:
+    for p in resp.json().get("products", []):
         hay = _words(p.get("title")) + _words(p.get("product_type")) + _words(p.get("tags"))
-        score = sum(1 for vs in variant_sets if any(h.startswith(v) for h in hay for v in vs))
+        score = sum(1 for w in words if any(h.startswith(v) for h in hay for v in _term_variants(w)))
         if score:
             scored.append((score, p))
     if not scored:
         return []
     best = max(sc for sc, _ in scored)
-    return [_product_card(p, store) for sc, p in scored if sc == best][:limit]
+    top = [p for sc, p in scored if sc == best]
+    return [_product_card(p, store) for p in top[:limit]]
 
 
-async def _catalog_search(store, term: str, limit: int = 6, products: list[dict] | None = None) -> list[dict] | None:
-    """Forgiving product search over the live catalog. Returns a list of
-    product cards (best matches only), [] when nothing matches, or None
-    when there's nothing to search for / Shopify couldn't be reached."""
-    cleaned = extract_search_term(term) or term
-    if not [w for w in _words(cleaned) if len(w) >= 2 and w not in _FILLER_WORDS]:
-        return None
-    if products is None:
-        products = await _fetch_catalog(store)
-        if products is None:
-            return None
-    return _match_products(products, term, store, limit)
-
-
-def _resolve_in(products: list[dict], text: str, store):
-    """(product, options) for `text` against an already-fetched catalog:
-    `product` only for an unambiguous match, `options` when several match."""
-    found = _match_products(products, text, store)
+async def _resolve_product(store, text: str):
+    """Resolves what the shopper said ('tee', 'the candle', 'Linen Tote')
+    to ONE product. Returns (product, options): `product` is set only for
+    an unambiguous match; `options` holds the candidates when several
+    match, so the caller can ask which one instead of guessing."""
+    found = await _catalog_search(store, text)
     if not found:
         return None, None
     wanted = (text or "").strip().lower()
@@ -350,17 +297,6 @@ def _resolve_in(products: list[dict], text: str, store):
     if len(found) == 1:
         return found[0], None
     return None, found
-
-
-async def _resolve_product(store, text: str):
-    """Resolves what the shopper said ('tee', 'the candle', 'Linen Tote')
-    to ONE product. Returns (product, options): `product` is set only for
-    an unambiguous match; `options` holds the candidates when several
-    match, so the caller can ask which one instead of guessing."""
-    products = await _fetch_catalog(store)
-    if not products:
-        return None, None
-    return _resolve_in(products, text, store)
 
 
 def _apply_price_filters(cards: list[dict], entities: dict) -> list[dict]:
@@ -398,8 +334,8 @@ def _as_variant_id(value):
 # Execution
 # =======================================================================
 @observe(name="execute_and_reply")
-async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str) -> dict:
-    raw = await shopify_actions.dispatch(intent, action, store, entities)
+async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str, session_id: str) -> dict:
+    raw = await shopify_actions.dispatch(intent, action, store, entities, session_id)
     data, widget_action = _split_widget_action(raw)
 
     # Exact-title search came back empty → retry with the forgiving
@@ -414,12 +350,6 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                     data = {**data, "results": alt}
 
     products = data.get("results") if action == "search_products" and isinstance(data, dict) else None
-    not_found_query = None
-    if action == "search_products" and isinstance(data, dict) and not data.get("error") and not products:
-        not_found_query = str(entities.get("query") or entities.get("category") or "that")
-        data = {**data, "results": [], "instruction": (
-            "Tell the shopper, warmly, that this item is not available in the store right now (use the words "
-            "'item not available') and offer to search for something else.")}
     orders = None
     if action == "list_recent_orders" and isinstance(data, dict) and isinstance(data.get("orders"), list):
         orders = [{"id": o.get("order_number"), "status": o.get("status")} for o in data["orders"] if o.get("order_number")]
@@ -428,10 +358,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     if action == "answer_policy_question" and entities.get("policy_type"):
         rag_query = f"{entities['policy_type'].replace('_', ' ')}: {original_message}"
 
-    if not_found_query:
-        fallback = f'Sorry, item not available \u2014 I looked, but we don\'t have "{not_found_query}" right now. Want to try another name? \U0001F642'
-    else:
-        fallback = "Good news \u2014 I found something! \U0001F389 Take a look:" if products else ("Done." if widget_action else "Sorry, I couldn't complete that.")
+    fallback = "Here's what I found:" if products else ("Done." if widget_action else "Sorry, I couldn't complete that.")
     reply = _safe_reply(
         action, _llm_view(data), language, original_message, fallback,
         store_identifier=store.shop_domain,
@@ -445,95 +372,32 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
         out["orders"] = orders
     if widget_action:
         out["widget_action"] = widget_action
+    if isinstance(data, dict) and "cart" in data:
+        out["cart"] = data["cart"]
+    if isinstance(data, dict) and data.get("error") in _VERIFY_ERRORS:
+        out["action_error"] = data["error"]
     return out
 
 
-_QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-              "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-_ITEM_SPLIT = re.compile(r"\s*(?:,|;|\+|\band\b|\balso\b|\bplus\b|\bthen\b)\s*")
-_ADD_NOISE = re.compile(
-    r"\b(?:(?:to|in|into|on)\s+(?:my\s+|the\s+)?(?:cart|basket|bag)|please|pls|add|put|get me|give me|"
-    r"i want|i need|i would like|i'd like|id like|can you|could you|also)\b")
+def _arm_verification_if_needed(key: str, intent: str, action: str, entities: dict, language: str, result: dict) -> None:
+    """If the action just run came back needing email verification, park
+    it (type="verify_email") so the shopper's next message — just an
+    email — completes this same request via _handle_followup below."""
+    if result.get("action_error") not in _VERIFY_ERRORS:
+        return
+    _set_pending(key, type="verify_email", intent=intent, action=action, entities=entities, language=language)
 
 
-async def _parse_add_request(store, text: str):
-    """Understands 'tee', 'tee and mug', 'tee, 2 mugs and a linen tote'.
-    Returns None if the catalog couldn't be loaded, otherwise
-    (found, ambiguous, missing):
-      found     -> [(product_card, quantity)]  exactly one product matched
-      ambiguous -> [(what_they_said, [candidate cards])]
-      missing   -> [what_they_said]            not in the store"""
-    products = await _fetch_catalog(store)
-    if products is None:
-        return None
-    t = _ADD_NOISE.sub(" ", (text or "").lower())
-    found: dict = {}
-    ambiguous, missing = [], []
-    for seg in _ITEM_SPLIT.split(t):
-        seg = seg.strip(" .!?")
-        qty = 1
-        m = re.match(r"^(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:x|\u00d7|of)?\s+(.*)$", seg)
-        if m:
-            qty = int(m.group(1)) if m.group(1).isdigit() else _QTY_WORDS[m.group(1)]
-            seg = m.group(2).strip()
-        if not [w for w in _words(seg) if len(w) >= 2 and w not in _FILLER_WORDS]:
-            continue  # nothing product-like in this piece ("an item", "please", ...)
-        product, options = _resolve_in(products, seg, store)
-        if product:
-            prev = found.get(product["id"])
-            found[product["id"]] = (product, (prev[1] if prev else 0) + qty)
-        elif options:
-            ambiguous.append((seg, options))
-        else:
-            missing.append(seg)
-    return list(found.values()), ambiguous, missing
-
-
-def _join_names(names: list[str]) -> str:
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-
-
-def _add_items_result(key: str, parsed, language: str, message: str) -> dict:
-    """Adds everything the shopper named STRAIGHT to the cart (no yes/no) and
-    answers chattily. One cart_add widget_action carries all the items."""
-    found, ambiguous, missing = parsed
-    labels = [f"{q} \u00d7 {p['name']}" if q > 1 else p["name"] for p, q in found]
-    quoted_missing = [f'"{x}"' for x in missing]
-
-    data: dict = {}
-    parts = []
-    if found:
-        data["added"] = [{"name": p["name"], "quantity": q} for p, q in found]
-        parts.append(f"Done! \U0001F389 I've added {_join_names(labels)} to your cart.")
-    if missing:
-        data["not_available"] = missing
-        parts.append(f"Sorry, {_join_names(quoted_missing)} isn't available right now.")
-    if ambiguous:
-        seg, options = ambiguous[0]
-        names = [o["name"] for o in options]
-        data["needs_choice"] = {"asked_about": seg, "options": names}
-        parts.append(f'For "{seg}" I found a few: {_join_names(names)}. Which one would you like?')
-        _set_pending(key, type="await_item", language=language, asked=1)
-    elif found:
-        data["ask_follow_up"] = True
-        parts.append("Anything else you'd like to add?")
-        _set_pending(key, type="await_more", language=language)
-
-    if found:
-        data["instruction"] = ("Tell the shopper, warmly, exactly which items were just added to their cart"
-                               + (" and that the not_available ones are not available" if missing else "")
-                               + (", then ask which of the options they meant" if ambiguous else ", then ask if they want anything else"))
-    else:
-        data["instruction"] = "Say, warmly, that the item is not available in the store (use the words 'item not available') and offer to try another name."
-        parts = [f"Sorry, item not available \u2014 I couldn't find {_join_names(quoted_missing)} in our shop. Want to try another name? \U0001F642"]
-
-    reply = _safe_reply("add_item", data, language, message, fallback=" ".join(parts))
-    out = {"status": "done", "reply": reply, "language": language, "intent": "cart_management", "action": "add_item"}
-    if found:
-        items = [{"variant_id": _as_variant_id(p["id"]), "quantity": q} for p, q in found]
-        out["widget_action"] = {"type": "cart_add", "items": items,
-                                "variant_id": items[0]["variant_id"], "quantity": items[0]["quantity"]}
-    return out
+def _add_to_cart_result(product: dict, quantity: int, language: str, message: str) -> dict:
+    reply = _safe_reply(
+        "add_item", {"added": product["name"], "quantity": quantity}, language, message,
+        fallback=f"Added {product['name']} to your cart!",
+    )
+    return {
+        "status": "done", "reply": reply, "language": language,
+        "intent": "cart_management", "action": "add_item",
+        "widget_action": {"type": "cart_add", "variant_id": _as_variant_id(product["id"]), "quantity": quantity},
+    }
 
 
 def _ask(key: str, ptype: str, instruction: str, language: str, message: str, fallback: str, **extra) -> dict:
@@ -544,7 +408,7 @@ def _ask(key: str, ptype: str, instruction: str, language: str, message: str, fa
     return {"status": "done", "reply": reply, "language": language}
 
 
-async def _handle_followup(store, shop: str, key: str, pending: dict, message: str) -> dict | None:
+async def _handle_followup(store, shop: str, key: str, pending: dict, message: str, session_id: str) -> dict | None:
     """The shopper's message is the answer to a question we just asked
     ('which item?', 'what's your order number?'). The pending entry has
     already been popped by the caller; re-park it here if we need to ask
@@ -554,9 +418,21 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
     language = pending.get("language", "en")
     asked = pending.get("asked", 1)
 
+    if ptype == "verify_email":
+        email_match = EMAIL_RE.search(message)
+        if not email_match:
+            # Doesn't look like an email — the shopper's moved on to
+            # something else rather than answering; treat as a fresh request.
+            return None
+        entities = {**pending["entities"], "email": email_match.group(0)}
+        result = await _execute_and_reply(store, pending["intent"], pending["action"], entities, language, message, session_id)
+        _arm_verification_if_needed(key, pending["intent"], pending["action"], entities, language, result)
+        _log(shop, message, result.get("status", "done"), pending["intent"], pending["action"], entities, result.get("reply", ""))
+        return result
+
     if ptype == "await_search_item":
         term = extract_search_term(message) or message.strip()
-        result = await _execute_and_reply(store, "product_search", "search_products", {"query": term}, language, message)
+        result = await _execute_and_reply(store, "product_search", "search_products", {"query": term}, language, message, session_id)
         _log(shop, message, "done", "product_search", "search_products", {"query": term}, result["reply"])
         return result
 
@@ -564,23 +440,12 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         m = _ORDER_NO_RE.search(message)
         if m:
             entities = {"order_number": m.group(1)}
-            result = await _execute_and_reply(store, "order_tracking", "track_order", entities, language, message)
-            _log(shop, message, "done", "order_tracking", "track_order", entities, result["reply"])
+            result = await _execute_and_reply(store, "order_tracking", "track_order", entities, language, message, session_id)
+            _arm_verification_if_needed(key, "order_tracking", "track_order", entities, language, result)
+            _log(shop, message, result.get("status", "done"), "order_tracking", "track_order", entities, result["reply"])
             return result
         # No order number in the reply → the shopper has moved on to
         # something else; let the caller handle it as a fresh request.
-        return None
-
-    if ptype == "await_more":
-        # Just added something; a bare item name ("and the mug") keeps adding.
-        # Anything that looks like a different request is handled normally.
-        if _OTHER_INTENT.search(message.lower()):
-            return None
-        parsed = await _parse_add_request(store, message)
-        if parsed and (parsed[0] or parsed[1]):
-            result = _add_items_result(key, parsed, language, message)
-            _log(shop, message, "done", "cart_management", "add_item", None, result["reply"])
-            return result
         return None
 
     # await_item / await_remove_item
@@ -591,31 +456,33 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         # Removal is matched against the shopper's actual cart in the
         # browser (widget.js asks if it's ambiguous), so no catalog lookup.
         name = extract_search_term(message) or message.strip()
-        result = await _execute_and_reply(store, intent, action, {"product_name_or_id": name}, language, message)
+        result = await _execute_and_reply(store, intent, action, {"product_name_or_id": name}, language, message, session_id)
         _log(shop, message, "done", intent, action, {"product_name_or_id": name}, result["reply"])
         return result
 
-    # "tee" / "tee and mug" / "2 mugs, a tote": add everything named, no yes/no.
-    parsed = await _parse_add_request(store, message)
-    if parsed and (parsed[0] or parsed[1] or parsed[2]):
-        result = _add_items_result(key, parsed, language, message)
-        _log(shop, message, "done" if parsed[0] else "not_found", intent, action, None, result["reply"])
-        if not parsed[0] and not parsed[1] and asked < 2:
-            # Nothing usable yet: keep waiting one more round for a better name.
-            _set_pending(key, type=ptype, language=language, asked=asked + 1)
+    product, options = await _resolve_product(store, message)
+    if product:
+        result = _add_to_cart_result(product, 1, language, message)
+        _log(shop, message, "done", intent, action, {"product_name_or_id": product["name"]}, result["reply"])
         return result
+    if options:
+        names = [p["name"] for p in options]
+        out = _ask(key, ptype, f"Tell the shopper several products match ({', '.join(names)}) and ask which one they mean.",
+                   language, message, f"I found a few matches — did you mean {', '.join(names)}?", asked=asked)
+        _log(shop, message, "ambiguous", intent, action, {"product_name_or_id": message.strip()}, out["reply"])
+        return out
 
     # Nothing recognizable. Ask once more before giving up, so a vague
     # answer ("yes please", "hmm") gets a second chance.
     if asked < 2:
         out = _ask(key, ptype, "Say you didn't catch an item name and ask the shopper to type the name of the item they'd like to add to their cart.",
-                   language, message, "Hmm, I didn't quite catch that one. \U0001F605 Could you type the name of the item you'd like to add to your cart?",
+                   language, message, "Sorry, I didn't catch an item name. Please enter the name of the item you'd like to add to your cart.",
                    asked=asked + 1)
         _log(shop, message, "awaiting_item", intent, action, None, out["reply"])
         return out
     reply = _safe_reply("add_item", {"error": "not_found", "query": message.strip(),
                                      "instruction": "Say you couldn't find that item and suggest trying the exact product name."},
-                        language, message, f'Sorry, item not available \u2014 I couldn\'t find "{message.strip()}" in our shop. Could you try the exact product name?')
+                        language, message, f'I couldn\'t find "{message.strip()}" — could you try the exact product name?')
     _log(shop, message, "not_found", intent, action, {"product_name_or_id": message.strip()}, reply)
     return {"status": "done", "reply": reply, "language": language}
 
@@ -647,7 +514,7 @@ async def chat(req: ChatRequest):
         if pending.get("type", "confirm") != "confirm":
             # The shopper's message answers a question we asked.
             try:
-                followup = await _handle_followup(store, req.shop, key, pending, message)
+                followup = await _handle_followup(store, req.shop, key, pending, message, req.session_id)
             except Exception as e:  # noqa: BLE001
                 get_client().update_current_span(level="ERROR", status_message=str(e))
                 print(f"chatbot_widget: follow-up error: {e!r}")
@@ -660,12 +527,13 @@ async def chat(req: ChatRequest):
     if pending is not None:
         text = message.lower().strip(" .!")
         if text in _AFFIRMATIVE:
-            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message)
+            result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], message, req.session_id)
+            _arm_verification_if_needed(key, pending["intent"], pending["action"], pending["entities"], pending["language"], result)
             _log(req.shop, message, result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
             return result
         if text in _NEGATIVE:
             cancel_reply = _safe_reply("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message,
-                                       fallback="No problem \u2014 that request was not submitted. Anything else I can help you with?")
+                                       fallback="No problem — that request was not submitted.")
             _log(req.shop, message, "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
             return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
         # Anything else: treat as the shopper moving on to a new request.
@@ -706,37 +574,34 @@ async def chat(req: ChatRequest):
             entities.get("query") or entities.get("category") or any(entities.get(k) not in (None, "", []) for k in _FILTER_ENTITIES)
         ):
             out = _ask(key, "await_search_item", "Ask the shopper which item they would like to search for.",
-                       language, message, "Of course! \U0001F50D What are you hunting for today? Tell me the item name and I'll go find it.")
+                       language, message, "Sure — which item would you like to search for?")
             _log(req.shop, message, "awaiting_item", intent, action, None, out["reply"])
             return out
 
         if (intent, action) == ("cart_management", "add_item"):
-            # Add straight away what the shopper named — one item or several
-            # ("tee and 2 mugs"). Read the message itself first; fall back to
-            # the classifier's product_name_or_id (e.g. a translated name).
-            parsed = await _parse_add_request(store, message)
-            if parsed is not None and not any(parsed):
-                term = entities.get("product_name_or_id")
-                if term:
-                    parsed = await _parse_add_request(store, str(term))
-            if parsed is not None and not any(parsed):
-                out = _ask(key, "await_item", "Ask the shopper which item they would like to add to their cart. Mention they can name a few at once.",
-                           language, message, "Happy to help with that! \U0001F60A Which item would you like to add to your cart? You can name a few at once, like Classic Tee and Ceramic Mug.", asked=1)
+            term = entities.get("product_name_or_id")
+            if not term:
+                out = _ask(key, "await_item", "Ask the shopper which item they would like to add to their cart.",
+                           language, message, "Sure — which item would you like to add to your cart?", asked=1)
                 _log(req.shop, message, "awaiting_item", intent, action, None, out["reply"])
                 return out
-            if parsed is not None:
-                found = parsed[0]
-                if len(found) == 1 and found[0][1] == 1 and int(entities.get("quantity") or 1) > 1:
-                    found = [(found[0][0], int(entities["quantity"]))]
-                    parsed = (found, parsed[1], parsed[2])
-                result = _add_items_result(key, parsed, language, message)
-                _log(req.shop, message, "done" if parsed[0] else "not_found", intent, action, entities, result["reply"])
+            product, options = await _resolve_product(store, str(term))
+            quantity = int(entities.get("quantity") or 1)
+            if product:
+                result = _add_to_cart_result(product, quantity, language, message)
+                _log(req.shop, message, "done", intent, action, {**entities, "product_name_or_id": product["name"]}, result["reply"])
                 return result
-            # Catalog unavailable → fall through to the exact-title lookup below.
+            if options:
+                names = [p["name"] for p in options]
+                out = _ask(key, "await_item", f"Tell the shopper several products match ({', '.join(names)}) and ask which one they mean.",
+                           language, message, f"I found a few matches — did you mean {', '.join(names)}?", asked=1)
+                _log(req.shop, message, "ambiguous", intent, action, entities, out["reply"])
+                return out
+            # No forgiving match → fall through to the exact-title lookup below.
 
         if (intent, action) == ("cart_management", "remove_item") and not entities.get("product_name_or_id"):
             out = _ask(key, "await_remove_item", "Ask the shopper which item they would like to remove from their cart.",
-                       language, message, "No problem! Which item would you like me to take out of your cart? Just tell me the name.", asked=1)
+                       language, message, "Sure — which item would you like to remove from your cart?", asked=1)
             _log(req.shop, message, "awaiting_item", intent, action, None, out["reply"])
             return out
 
@@ -748,7 +613,7 @@ async def chat(req: ChatRequest):
             needs_number = (action == "track_order" and not has_number) or (action == "list_recent_orders" and not entities.get("email"))
             if needs_number:
                 out = _ask(key, "await_order_number", "Ask the shopper for their order number (for example #1001).",
-                           language, message, "Happy to check on that for you! \U0001F4E6 What's your order number? (It looks like #1001.)", asked=1)
+                           language, message, "Sure — what's your order number?", asked=1)
                 _log(req.shop, message, "awaiting_item", intent, action, None, out["reply"])
                 return out
     except Exception as e:  # noqa: BLE001
@@ -769,7 +634,8 @@ async def chat(req: ChatRequest):
         return {"status": "confirmation_required", "reply": confirm_reply, "language": language}
 
     try:
-        result = await _execute_and_reply(store, intent, action, entities, language, message)
+        result = await _execute_and_reply(store, intent, action, entities, language, message, req.session_id)
+        _arm_verification_if_needed(key, intent, action, entities, language, result)
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
         return result
     except Exception as e:  # noqa: BLE001
@@ -797,12 +663,13 @@ async def confirm(req: ConfirmRequest):
 
     if not req.confirmed:
         cancel_reply = _safe_reply("cancelled", {"message": "The shopper declined."}, pending["language"], "cancel",
-                                   fallback="No problem \u2014 that request was not submitted. Anything else I can help you with?")
+                                   fallback="No problem — that request was not submitted.")
         _log(req.shop, "confirmed=false", "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
         return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
     try:
-        result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed")
+        result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed", req.session_id)
+        _arm_verification_if_needed(_pkey(req.shop, req.session_id), pending["intent"], pending["action"], pending["entities"], pending["language"], result)
     except Exception as e:  # noqa: BLE001
         get_client().update_current_span(level="ERROR", status_message=str(e))
         print(f"chatbot_widget: confirm dispatch error: {e}")
@@ -886,29 +753,14 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root #expandToggle.active-expand .icon-expand { display:none; }",
     "#ai-chat-widget-root #expandToggle.active-expand .icon-collapse { display:block; }",
     "#ai-chat-widget-root .history-divider { text-align:center; font-size:9.5px; color:#999; margin:6px 0; }",
-    "#ai-chat-widget-root .history-hint { position:absolute; left:11px; right:11px; z-index:3; text-align:center; font-size:9px; font-weight:500; letter-spacing:.3px; line-height:1; color:#b4b4b4; background:transparent; padding:3px 0 0; cursor:pointer; user-select:none; -webkit-user-select:none; pointer-events:auto; transition:opacity .3s ease, transform .3s ease; animation:hhShimmer 2.2s ease-in-out infinite; }",
-    "#ai-chat-widget-root .history-hint .hh-arrow { display:block; width:5px; height:5px; margin:3px auto 0; border-right:1.3px solid #bdbdbd; border-bottom:1.3px solid #bdbdbd; transform:rotate(45deg); animation:hhBounce 1.2s ease-in-out infinite; }",
-    "@keyframes hhBounce { 0%,100% { transform:translateY(0) rotate(45deg); opacity:.4; } 50% { transform:translateY(4px) rotate(45deg); opacity:1; } }",
-    "@keyframes hhShimmer { 0%,100% { opacity:.55; } 50% { opacity:1; } }",
-    "#ai-chat-widget-root .history-hint.leaving { opacity:0; transform:translateY(-6px); pointer-events:none; animation:none; }",
-    "#ai-chat-widget-root .conversation.has-hint { padding-top:24px; -webkit-mask-image:linear-gradient(to bottom, transparent 0, transparent 16px, #000 30px); mask-image:linear-gradient(to bottom, transparent 0, transparent 16px, #000 30px); }",
-    "#ai-chat-widget-root .conversation.nudge { animation:hhNudge 1.1s ease-in-out 1; }",
-    "@keyframes hhNudge { 0%,100% { transform:translateY(0); } 35% { transform:translateY(12px); } 65% { transform:translateY(3px); } }",
+    "#ai-chat-widget-root .history-hint { position:sticky; top:0; z-index:3; background:rgba(248,247,244,.97); flex-shrink:0; text-align:center; font-size:10px; font-weight:500; color:#b9b9b9; padding:2px 0 4px; max-height:44px; overflow:hidden; cursor:pointer; user-select:none; -webkit-user-select:none; transition:transform .2s ease, opacity .3s ease, max-height .35s ease, padding .35s ease; }",
+    "#ai-chat-widget-root .history-hint .hh-arrow { display:block; width:7px; height:7px; margin:4px auto 0; border-right:1.5px solid #c8c8c8; border-bottom:1.5px solid #c8c8c8; transform:rotate(45deg); animation:hhBounce 1.4s ease-in-out infinite; }",
+    "@keyframes hhBounce { 0%,100% { transform:translateY(0) rotate(45deg); opacity:.45; } 50% { transform:translateY(4px) rotate(45deg); opacity:1; } }",
+    "#ai-chat-widget-root .history-hint.leaving { opacity:0; max-height:0; padding:0; }",
     "#ai-chat-widget-root .history-in { animation:hhIn .45s cubic-bezier(.22,1,.36,1) both; }",
     "@keyframes hhIn { from { opacity:0; transform:translateY(-16px); } to { opacity:1; transform:translateY(0); } }",
     "#ai-chat-widget-root .history-label { font-size:9.5px; color:#999; text-align:center; margin:2px 0 6px; }",
-    "#ai-chat-widget-root .conversation { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; padding-right:4px; }",
-    "#ai-chat-widget-root .conversation { scroll-behavior:smooth; }",
-    "@supports not selector(::-webkit-scrollbar) { #ai-chat-widget-root .conversation { scrollbar-width:thin; scrollbar-color:rgba(60,70,64,.5) rgba(0,0,0,.06); } }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar { width:7px; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-track { background:rgba(0,0,0,.05); border-radius:999px; margin:4px 0; }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb { background:linear-gradient(180deg, rgba(60,70,64,.55), rgba(60,70,64,.35)); border-radius:999px; border:1px solid rgba(255,255,255,.55); }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb:hover { background:rgba(40,50,44,.75); }",
-    "#ai-chat-widget-root .conversation::-webkit-scrollbar-thumb:active { background:rgba(30,40,34,.9); }",
-    "#ai-chat-widget-root .widget:not(.expanded) .conversation::-webkit-scrollbar { width:3px; }",
-    "#ai-chat-widget-root .widget:not(.expanded) .conversation::-webkit-scrollbar-track { background:transparent; margin:6px 0; }",
-    "#ai-chat-widget-root .widget:not(.expanded) .conversation::-webkit-scrollbar-thumb { border:0; background:rgba(60,70,64,.4); }",
-    "@media (pointer:coarse) { #ai-chat-widget-root .conversation::-webkit-scrollbar { width:3px; } #ai-chat-widget-root .conversation::-webkit-scrollbar-track { background:transparent; margin:6px 0; } #ai-chat-widget-root .conversation::-webkit-scrollbar-thumb { border:0; background:rgba(60,70,64,.4); } }",
+    "#ai-chat-widget-root .conversation { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; padding-right:2px; }",
     "#ai-chat-widget-root .bubble { box-sizing:border-box !important; display:block !important; height:auto !important; max-height:none !important; overflow:visible !important; border-radius:12px; padding:7px 9px; font-size:10px; line-height:1.4; width:fit-content; max-width:92%; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; min-width:0; }",
     "#ai-chat-widget-root .bubble.bot { background:rgba(255,255,255,.75) !important; border:1px solid rgba(236,236,236,.8); color:#2a2a2a; box-shadow:0 2px 8px rgba(0,0,0,.05); align-self:flex-start; }",
     "#ai-chat-widget-root .bubble.user { background:#2b2b2b !important; color:#fff; align-self:flex-end; }",
@@ -1207,12 +1059,6 @@ WIDGET_JS = r"""
   function personalizeReply(text) {
     if (!shopperName || !text) return text;
     if (text.toLowerCase().indexOf(shopperName.toLowerCase()) !== -1) return text;
-    // Lower-case the first letter so it reads "Priya, ooh, great pick!" rather
-    // than "Priya, Ooh, ..." \u2014 but leave "I...", "#1001", names and numbers alone.
-    var first = text.charAt(0), second = text.charAt(1);
-    if (first >= "A" && first <= "Z" && second >= "a" && second <= "z" && !/^I(\u2019|')/.test(text)) {
-      text = first.toLowerCase() + text.slice(1);
-    }
     return shopperName + ", " + text;
   }
 
@@ -1616,13 +1462,11 @@ WIDGET_JS = r"""
   }
 
   function cartAdd(variantId, quantity, btnEl) {
-    // variantId may also be an array of { id, quantity } for several items at once.
-    var cartItems = Array.isArray(variantId) ? variantId : [{ id: variantId, quantity: quantity || 1 }];
     if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Adding\u2026"; }
     fetch("/cart/add.js", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: cartItems })
+      body: JSON.stringify({ items: [{ id: variantId, quantity: quantity || 1 }] })
     })
       .then(function (res) { if (!res.ok) throw new Error("add failed"); return res.json(); })
       .then(function () {
@@ -1750,11 +1594,7 @@ WIDGET_JS = r"""
         if (action.url) setTimeout(function () { window.location.href = action.url; }, 600);
         break;
       case "cart_add":
-        if (Array.isArray(action.items) && action.items.length) {
-          cartAdd(action.items.map(function (i) { return { id: i.variant_id, quantity: i.quantity || 1 }; }), 1, null);
-        } else {
-          cartAdd(action.variant_id, action.quantity || 1, null);
-        }
+        cartAdd(action.variant_id, action.quantity || 1, null);
         break;
       case "cart_remove":
         cartChangeItem(action, 0);
@@ -1776,9 +1616,9 @@ WIDGET_JS = r"""
 
   var QUICK_ACTIONS = [
     { icon: "\uD83D\uDD0D", label: "Search products", command: "Show me products" },
-    { icon: "\uD83D\uDED2", label: "Add an item to cart", command: "Add an item to cart" },
+    { icon: "\uD83D\uDED2", label: "Add an item to cart", command: "I'd like to add an item to my cart" },
     { icon: "\uD83D\uDCB2", label: "Filter by price", command: "Show me products under $20" },
-    { icon: "\uD83D\uDEE1\uFE0F", label: "Claim a warranty", command: "Claim a warranty for order #1001" },
+    { icon: "\uD83D\uDEE1\uFE0F", label: "Claim a warranty", command: "I want to claim a warranty for order #1001" },
     { icon: "\uD83D\uDCE6", label: "Track my order", command: "Track my order" }
   ];
   function renderQuickActions() {
@@ -1888,4 +1728,184 @@ WIDGET_JS = r"""
   // messages from an earlier visit slide in underneath the quick-action
   // buttons, one after another.
   function getPreviousBubbles(count) {
-    return getRecentBubbles(priorHi
+    return getRecentBubbles(priorHistory, count);
+  }
+
+  var historyHintEl = null;
+
+  function offerPreviousChats(count) {
+    if (historyShown || historyHintEl) return;
+
+    var hint = document.createElement("div");
+    hint.className = "history-hint";
+    hint.setAttribute("role", "button");
+    hint.setAttribute("tabindex", "0");
+    var label = document.createElement("span");
+    label.textContent = "Swipe down to see previous chats";
+    var arrow = document.createElement("span");
+    arrow.className = "hh-arrow";
+    hint.appendChild(label);
+    hint.appendChild(arrow);
+    conversation.insertBefore(hint, conversation.firstChild);
+    conversation.scrollTop = 0;
+    historyHintEl = hint;
+
+    var PULL_TO_OPEN = 45;
+    var startY = null;
+    function pullStart(y) { startY = conversation.scrollTop <= 0 ? y : null; }
+    function pullMove(y) {
+      if (startY === null) return;
+      var dy = y - startY;
+      if (dy <= 0) { hint.style.transform = ""; return; }
+      hint.style.transform = "translateY(" + Math.min(dy, 60) * 0.5 + "px)";
+      if (dy >= PULL_TO_OPEN) { startY = null; showPreviousChats(count); }
+    }
+    function pullEnd() { startY = null; hint.style.transform = ""; }
+
+    conversation.addEventListener("touchstart", function (e) { pullStart(e.touches[0].clientY); }, { passive: true });
+    conversation.addEventListener("touchmove", function (e) { pullMove(e.touches[0].clientY); }, { passive: true });
+    conversation.addEventListener("touchend", pullEnd);
+    conversation.addEventListener("touchcancel", pullEnd);
+
+    var mouseDown = false;
+    conversation.addEventListener("mousedown", function (e) { mouseDown = true; pullStart(e.clientY); });
+    document.addEventListener("mousemove", function (e) { if (mouseDown) pullMove(e.clientY); });
+    document.addEventListener("mouseup", function () { mouseDown = false; pullEnd(); });
+
+    conversation.addEventListener("wheel", function (e) {
+      if (e.deltaY < -12 && conversation.scrollTop <= 0) showPreviousChats(count);
+    }, { passive: true });
+
+    hint.addEventListener("click", function () { showPreviousChats(count); });
+    hint.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showPreviousChats(count); }
+    });
+  }
+
+  // Slides the last few messages from a previous session in, directly
+  // underneath the quick-action buttons (above anything sent since).
+  function showPreviousChats(count) {
+    if (historyShown) return;
+    historyShown = true;
+    var recent = getPreviousBubbles(count);
+
+    if (!recent.length) {
+      // Nothing from an earlier visit: say so, then tidy the hint away.
+      if (historyHintEl) {
+        var e = historyHintEl;
+        historyHintEl = null;
+        e.firstChild.textContent = "No previous chats yet";
+        var arrowEl = e.querySelector(".hh-arrow");
+        if (arrowEl) arrowEl.style.display = "none";
+        setTimeout(function () {
+          e.classList.add("leaving");
+          setTimeout(function () { if (e.parentNode) e.parentNode.removeChild(e); }, 400);
+        }, 1600);
+      }
+      return;
+    }
+    if (historyHintEl) {
+      var h = historyHintEl;
+      historyHintEl = null;
+      h.classList.add("leaving");
+      setTimeout(function () { if (h.parentNode) h.parentNode.removeChild(h); }, 400);
+    }
+
+    var anchor = conversation.querySelector(".quick-actions");
+    function place(el, index) {
+      el.classList.add("history-in");
+      el.style.animationDelay = (index * 90) + "ms";
+      if (anchor) { conversation.insertBefore(el, anchor.nextSibling); anchor = el; }
+    }
+
+    var divider = document.createElement("div");
+    divider.className = "history-divider";
+    divider.textContent = "Previous conversation";
+    if (!anchor) conversation.appendChild(divider);
+    place(divider, 0);
+
+    // record:false keeps these out of chatHistory (they're already in it
+    // from last time); silent:true stops the TTS from reading them back.
+    recent.forEach(function (item, i) {
+      var b = addBubble(item.text, item.who, { record: false, silent: true });
+      place(b, i + 1);
+    });
+    autoResizeConversation();
+  }
+
+  refreshCartBadge();
+
+  var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var recognition = null, listening = false;
+  var audioCtx = null, analyser = null, micStream = null, rafId = null;
+
+  function startGlow() {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      micStream = stream;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      var source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.6;
+      source.connect(analyser);
+      var data = new Uint8Array(analyser.frequencyBinCount);
+      (function tick() {
+        analyser.getByteTimeDomainData(data);
+        var sumSquares = 0;
+        for (var i = 0; i < data.length; i++) { var c = (data[i] - 128) / 128; sumSquares += c * c; }
+        var level = Math.min(1, Math.sqrt(sumSquares / data.length) * 6);
+        micBtn.style.setProperty("--level", level.toFixed(3));
+        micBtn.classList.toggle("speaking", level > 0.04);
+        rafId = requestAnimationFrame(tick);
+      })();
+    }).catch(function () { micStatus.textContent = "Mic permission needed for glow effect."; });
+  }
+  function stopGlow() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    micBtn.classList.remove("speaking");
+    micBtn.style.setProperty("--level", 0);
+    if (micStream) { micStream.getTracks().forEach(function (t) { t.stop(); }); micStream = null; }
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    analyser = null;
+  }
+
+  if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognition.onstart = function () {
+      listening = true;
+      micBtn.classList.add("listening");
+      micStatus.textContent = "Listening\u2026";
+      startGlow();
+    };
+    recognition.onresult = function (event) {
+      var interim = "", final = "";
+      for (var i = 0; i < event.results.length; i++) {
+        var t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) final += t; else interim += t;
+      }
+      input.value = final || interim;
+    };
+    recognition.onerror = function (event) { micStatus.textContent = "Mic error: " + event.error; };
+    recognition.onend = function () {
+      listening = false;
+      micBtn.classList.remove("listening");
+      micStatus.textContent = "";
+      stopGlow();
+      if (input.value.trim()) sendMessage(input.value);
+    };
+    micBtn.addEventListener("click", function () {
+      if (micBtn.classList.contains("has-text")) { sendMessage(input.value); return; }
+      if (listening) { recognition.stop(); } else { input.value = ""; recognition.start(); }
+    });
+  } else {
+    micBtn.addEventListener("click", function () {
+      if (micBtn.classList.contains("has-text")) { sendMessage(input.value); return; }
+      micStatus.textContent = "Voice input is not supported in this browser.";
+    });
+  }
+})();
+"""
