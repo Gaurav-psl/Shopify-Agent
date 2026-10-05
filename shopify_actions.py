@@ -55,7 +55,7 @@ import httpx
 
 import tracking_provider
 
-SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2024-10")
+SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-10")
 
 
 def _headers(store) -> dict:
@@ -84,6 +84,106 @@ async def _put(store, path: str, json: dict) -> httpx.Response:
     async with httpx.AsyncClient(timeout=15) as client:
         return await client.put(_url(store, path), headers=_headers(store), json=json)
 
+
+
+
+# ==========================================================================
+# Authenticated customer data (GraphQL Admin API)
+# ==========================================================================
+async def _graphql_admin(store, query: str, variables: dict | None = None) -> dict | None:
+    url = f"https://{store.shop_domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(url, headers=_headers(store), json={"query": query, "variables": variables or {}})
+    except Exception as e:
+        print(f"shopify_actions: GraphQL request failed: {e!r}")
+        return None
+    if resp.status_code != 200:
+        print(f"shopify_actions: GraphQL HTTP {resp.status_code}: {resp.text[:500]}")
+        return None
+    body=resp.json()
+    if body.get("errors"):
+        print(f"shopify_actions: GraphQL errors: {body['errors']}")
+        return None
+    return body.get("data")
+
+
+async def get_customer(store, customer_id: str) -> dict | None:
+    query="""
+    query Customer($id: ID!) {
+      customer(id: $id) {
+        id firstName lastName
+        defaultEmailAddress { emailAddress }
+        numberOfOrders
+      }
+    }
+    """
+    data=await _graphql_admin(store,query,{"id":f"gid://shopify/Customer/{customer_id}"})
+    return (data or {}).get("customer")
+
+
+async def get_customer_orders(store, customer_id: str, first: int=50) -> dict:
+    query="""
+    query CustomerOrders($first: Int!, $query: String!) {
+      orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+        nodes {
+          id name createdAt displayFinancialStatus displayFulfillmentStatus
+          totalPriceSet { shopMoney { amount currencyCode } }
+          lineItems(first: 20) { nodes { name quantity variant { id title } } }
+          fulfillments { trackingInfo { number url company } }
+        }
+      }
+    }
+    """
+    data=await _graphql_admin(store,query,{"first":min(max(first,1),100),"query":f"customer_id:{customer_id}"})
+    nodes=((data or {}).get("orders") or {}).get("nodes") or []
+    active=[]; past=[]; purchased=[]
+    for order in nodes:
+        items=[]
+        for line in (order.get("lineItems") or {}).get("nodes") or []:
+            variant=line.get("variant") or {}
+            if variant.get("id"): purchased.append(str(variant["id"]).split("/")[-1])
+            items.append({"name":line.get("name"),"quantity":line.get("quantity"),"variant":variant.get("title")})
+        total=(order.get("totalPriceSet") or {}).get("shopMoney") or {}
+        fulfillment=(order.get("displayFulfillmentStatus") or "").lower()
+        entry={
+            "id":order.get("id"),"order_number":str(order.get("name") or "").lstrip("#"),
+            "date":(order.get("createdAt") or "")[:10],"status":fulfillment.replace("_"," ") or "unknown",
+            "financial_status":order.get("displayFinancialStatus"),"total":total.get("amount"),
+            "currency":total.get("currencyCode"),"items":items,
+            "tracking":[t for f in (order.get("fulfillments") or []) for t in (f.get("trackingInfo") or []) if t]
+        }
+        if fulfillment in {"fulfilled","shipped"}: past.append(entry)
+        else: active.append(entry)
+    return {"active_orders":active,"past_orders":past,"purchased_product_ids":purchased}
+
+
+async def get_active_products_graphql(store, first: int=100) -> list[dict]:
+    query="""
+    query Products($first: Int!) {
+      products(first: $first, query: "status:ACTIVE") {
+        nodes { id title handle productType tags featuredImage { url } variants(first: 10) { nodes { id title price } } }
+      }
+    }
+    """
+    data=await _graphql_admin(store,query,{"first":min(max(first,1),250)})
+    nodes=((data or {}).get("products") or {}).get("nodes") or []
+    return [{
+        "id":str(p.get("id") or "").split("/")[-1],"title":p.get("title"),"handle":p.get("handle"),
+        "product_type":p.get("productType"),"tags":p.get("tags") or [],"image":(p.get("featuredImage") or {}).get("url",""),
+        "variants":[{"id":str(v.get("id") or "").split("/")[-1],"title":v.get("title"),"price":v.get("price")} for v in ((p.get("variants") or {}).get("nodes") or [])]
+    } for p in nodes]
+
+
+async def get_my_orders(store, entities: dict, session_id: str, customer_id: str | None=None) -> dict:
+    if not customer_id: return {"error":"authentication_required"}
+    return await get_customer_orders(store,customer_id,first=50)
+
+
+async def get_recommendations(store, entities: dict, session_id: str, customer_id: str | None=None) -> dict:
+    if not customer_id: return {"error":"authentication_required"}
+    import recommendation_engine
+    return await recommendation_engine.recommend_products(store,entities.get("_customer_profile") or {},limit=6)
 
 # ==========================================================================
 # Storefront API — cart engine
@@ -716,13 +816,17 @@ ACTION_MAP = {
     "warranty_claim.check_claim_status": check_claim_status,
     "product_search.search_products": search_products,
     "policy_query.answer_policy_question": answer_policy_question,
+    "customer_account.get_my_orders": get_my_orders,
+    "customer_account.get_recommendations": get_recommendations,
     "fallback.clarify": clarify,
 }
 
 
-async def dispatch(intent: str, action: str, store, entities: dict, session_id: str) -> dict:
+async def dispatch(intent: str, action: str, store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     key = f"{intent}.{action}"
     fn = ACTION_MAP.get(key)
     if fn is None:
         return {"error": f"No handler registered for {key}"}
+    if intent == "customer_account":
+        return await fn(store, entities, session_id, customer_id=customer_id)
     return await fn(store, entities, session_id)
