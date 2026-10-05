@@ -664,9 +664,16 @@ def _pref_keywords(entities: dict) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]+", text) if len(w) >= 2]
 
 
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _variant_matches_filters(variant: dict, entities: dict, haystack: str) -> tuple[bool, float, str]:
-    price_min = entities.get("price_min")
-    price_max = entities.get("price_max")
+    price_min = _as_float(entities.get("price_min"))
+    price_max = _as_float(entities.get("price_max"))
     color = (entities.get("color") or "").strip().lower()
     size = (entities.get("size") or "").strip().lower()
 
@@ -675,9 +682,9 @@ def _variant_matches_filters(variant: dict, entities: dict, haystack: str) -> tu
     except (TypeError, ValueError):
         price = 0.0
 
-    if price_min is not None and price < float(price_min):
+    if price_min is not None and price < price_min:
         return False, price, ""
-    if price_max is not None and price > float(price_max):
+    if price_max is not None and price > price_max:
         return False, price, ""
 
     opts = " ".join(str(v) for v in [variant.get("option1"), variant.get("option2"), variant.get("option3")] if v).lower()
