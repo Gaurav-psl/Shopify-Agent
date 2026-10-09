@@ -98,6 +98,10 @@ async def recommend_products(store, customer_profile: dict | None, limit: int = 
         scored.append((score, product))
 
     scored.sort(key=lambda x: x[0], reverse=True)
+    # Never re-recommend something they already bought, unless the catalog is too small to fill the list.
+    unseen = [x for x in scored if _num_id(x[1].get("id")) not in purchased]
+    if len(unseen) >= min(limit, 3):
+        scored = unseen
     personalized = bool(weights or purchased)
     return {
         "results": [_card(p, store) for _, p in scored[:limit]],
