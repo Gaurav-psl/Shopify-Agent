@@ -89,6 +89,8 @@ _FEATURE_FOR_ACTION = {
     ("warranty_claim", "check_claim_status"): "warranty",
     ("order_tracking", "track_order"): "track_orders",
     ("order_tracking", "list_recent_orders"): "track_orders",
+    ("customer_account", "get_my_orders"): "track_orders",
+    ("customer_account", "get_recommendations"): "product_search",
 }
 _FILTER_ENTITIES = ("price_min", "price_max", "color", "size")
 
@@ -221,6 +223,12 @@ _SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|a
 _LEADING_ARTICLE = re.compile(r"^\s*(a|an|the)\s+")
 _CHECKOUT_RE = re.compile(r"\b(check ?out|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
 _ORDER_NO_RE = re.compile(r"#?\s*(\d{3,})")
+_MY_ORDERS_RE = re.compile(
+    r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b|\border (history|list)\b|\bwhat (have|did) i (order|ordered|bought|purchased)\b|\b(show|list|see|view) (me )?(my )?orders\b",
+    re.IGNORECASE)
+_RECOMMEND_RE = re.compile(
+    r"\brecommend|\bsuggest|\bsomething for me\b|\bwhat (should|can|do) i (buy|get)\b|\bpick(s)? for me\b|\bwhat would i like\b|\bsomething i (would|might|could) like\b",
+    re.IGNORECASE)
 
 # Order/claim lookups (track_order, list_recent_orders, submit_claim,
 # check_claim_status in shopify_actions.py) require the shopper to
@@ -335,6 +343,8 @@ def _apply_price_filters(cards: list[dict], entities: dict) -> list[dict]:
 
 
 def _llm_view(data):
+    if isinstance(data, dict) and "purchased_product_ids" in data:
+        data = {k: v for k, v in data.items() if k != "purchased_product_ids"}
     """What the reply generator sees: names and prices, not image URLs /
     variant ids (they only bloat the prompt)."""
     if not isinstance(data, dict) or not isinstance(data.get("results"), list):
@@ -373,7 +383,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     if action == "list_recent_orders" and isinstance(data, dict) and isinstance(data.get("orders"), list):
         orders = [{"id": o.get("order_number"), "status": o.get("status")} for o in data["orders"] if o.get("order_number")]
     elif action == "get_my_orders" and isinstance(data, dict):
-        orders = (data.get("active_orders") or []) + (data.get("past_orders") or [])
+        orders = [{**o, "group": "active"} for o in (data.get("active_orders") or [])] + [{**o, "group": "past"} for o in (data.get("past_orders") or [])]
 
     rag_query = original_message
     if action == "answer_policy_question" and entities.get("policy_type"):
@@ -383,7 +393,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     reply = _safe_reply(
         action, _llm_view(data), language, original_message, fallback,
         store_identifier=store.shop_domain,
-        needs_rag=(action == "answer_policy_question" ),
+        needs_rag=(action == "answer_policy_question" or action == "search_products"),
         rag_query=rag_query,
     )
     out = {"status": "done", "reply": reply, "language": language, "intent": intent, "action": action}
@@ -585,6 +595,16 @@ async def chat(req: ChatRequest):
         if m:
             entities["order_number"] = m.group(1)
     language = classification["language"]
+    if customer_id and (intent, action) == ("order_tracking", "list_recent_orders"):
+        intent, action = "customer_account", "get_my_orders"
+    if customer_id and (intent, action) == ("order_tracking", "track_order") and not (entities.get("order_number") or entities.get("order_id")):
+        intent, action = "customer_account", "get_my_orders"
+    # "show my orders" / "recommend something for me" always mean the account features, whatever the classifier guessed.
+    if intent in ("fallback", "order_tracking", "product_search") and not _ORDER_NO_RE.search(message) and _MY_ORDERS_RE.search(message):
+        intent, action = "customer_account", "get_my_orders"
+    elif intent in ("fallback", "product_search") and _RECOMMEND_RE.search(message) and not any(
+            entities.get(k) not in (None, "", []) for k in ("query", "category", "color", "price_min", "price_max")):
+        intent, action = "customer_account", "get_recommendations"
     if customer_id and intent == "product_search":
         asyncio.create_task(customer_profiles.record_interaction(req.shop, customer_id, dict(entities), customer_profile))
 
@@ -595,6 +615,13 @@ async def chat(req: ChatRequest):
             reply = _safe_reply("checkout", {"message": "Taking the shopper to checkout."}, language, message, fallback="Taking you to checkout.")
             _log(req.shop, message, "done", "cart_management", "checkout", None, reply)
             return {"status": "done", "reply": reply, "language": language, "widget_action": {"type": "checkout"}}
+
+        # --- Account-only requests need a verified login.
+        if intent == "customer_account" and action == "get_my_orders" and not customer_id:
+            reply = _safe_reply("login_required", {"message": "The shopper needs to be logged in to their store account for this. Ask them to log in, then ask again."}, language, message,
+                                fallback="Please log in to your account first, and then I can help with that.")
+            _log(req.shop, message, "login_required", intent, action, None, reply)
+            return {"status": "done", "reply": reply, "language": language}
 
         # --- Per-store Features toggles from the dashboard.
         if not _feature_enabled(store.id, intent, action, entities):
@@ -735,17 +762,17 @@ async def customer_session(request: Request):
         stale=(int(profile.get("synced_at") or 0) + 3600) < int(time.time())
         if stale or not profile.get("purchased_product_ids"):
             order_data=await shopify_actions.get_customer_orders(store,customer_id,first=50)
-            fields["purchased_product_ids"]=order_data.get("purchased_product_ids") or []
+            if not order_data.get("error"): fields["purchased_product_ids"]=order_data.get("purchased_product_ids") or []
             names=[]; variants=[]
             for order in (order_data.get("active_orders") or [])+(order_data.get("past_orders") or []):
                 for item in order.get("items") or []:
                     if item.get("name"): names.append(item["name"])
                     if item.get("variant"): variants.append(item["variant"])
-            fields["top_types"]=list(dict.fromkeys(names))[:20]
-            fields["top_tags"]=list(dict.fromkeys(variants))[:20]
+            if names: fields["top_types"]=list(dict.fromkeys(names))[:20]
+            if variants: fields["top_tags"]=list(dict.fromkeys(variants))[:20]
         await customer_profiles.save_profile(shop,customer_id,fields)
         profile={**profile,**fields}
-    return {"authenticated":True,"customer_id":str(customer_id),"customer_token":token,"first_name":(customer or {}).get("firstName") or profile.get("first_name") or "","profile":profile}
+    return {"authenticated":True,"customer_id":str(customer_id),"customer_token":token,"first_name":(customer or {}).get("firstName") or profile.get("first_name") or ""}
 
 
 @router.get("/widget-config")
@@ -1465,7 +1492,7 @@ WIDGET_JS = r"""
   // --------------------------------------------------------------------
   function addOrderPicker(orders, opts) {
     opts=opts||{};
-    var active=orders.filter(function(o){return ["fulfilled","shipped","delivered"].indexOf(String(o.status||"").toLowerCase())===-1;});
+    var active=orders.filter(function(o){return o.group?o.group==="active":["fulfilled","shipped","delivered"].indexOf(String(o.status||"").toLowerCase())===-1;});
     var past=orders.filter(function(o){return active.indexOf(o)===-1;});
     function renderGroup(title,list){
       if(!list.length)return;
@@ -1473,7 +1500,7 @@ WIDGET_JS = r"""
       list.forEach(function(o){
         var card=document.createElement("div"); card.className="order-card";
         var top=document.createElement("div"); top.className="order-card-top";
-        var num=document.createElement("strong"); num.textContent="#"+(o.id||o.order_number||""); top.appendChild(num);
+        var num=document.createElement("strong"); num.textContent="#"+(o.order_number||o.id||""); top.appendChild(num);
         var st=document.createElement("span"); st.className="order-status"; st.textContent=o.status||"Unknown"; top.appendChild(st); card.appendChild(top);
         if(o.date){var d=document.createElement("div");d.className="order-meta";d.textContent=o.date;card.appendChild(d);}
         if(o.items&&o.items.length){var it=document.createElement("div");it.className="order-items";it.textContent=o.items.map(function(i){return (i.name||"Item")+" ×"+(i.quantity||1);}).join(", ");card.appendChild(it);}
