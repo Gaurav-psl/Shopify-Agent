@@ -1,3 +1,19 @@
+
+
+Skip to content
+Using Gmail with screen readers
+This browser version is no longer supported. Please upgrade to a supported browser.
+1 of 20
+(no subject)
+Inbox
+
+RAHUL KATHERIYA <rahulkatheriya2005@gmail.com>
+Attachments
+7:19 PM (1 minute ago)
+to me
+
+ One attachment
+  •  Scanned by Gmail
 """
 dashboard_nicegui.py
 ---------------------
@@ -14,15 +30,20 @@ See the bottom of main.py for how this mounts onto your FastAPI app.
 Run: pip install nicegui
 """
 
+import inspect
+import logging
 import os
 import time
+from datetime import date, datetime, timedelta, timezone
 
 import bcrypt
 import httpx
-from nicegui import ui, app
+from nicegui import ui, app, run
 
 import repository_appwrite as repo
 import email_utils
+
+logger = logging.getLogger("renderlink.dashboard")
 
 APP_URL = (os.environ.get("APP_URL") or os.environ.get("HOST") or "http://localhost:8080").strip().rstrip("/")
 
@@ -39,6 +60,7 @@ SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY", "")
 
 NAV_ITEMS = [
     ("Dashboard", "Dashboard", "home"),
+    ("analytics", "Analytics", "bar_chart"),
     ("store", "Store Information", "storefront"),
     ("agent", "AI Agent", "smart_toy"),
     ("features", "Features", "grid_view"),
@@ -371,8 +393,12 @@ def _features_dropdown(store: dict, features: dict):
         )
 
         panels = {}
+        state_labels = {}
         for key, label, icon in FEATURE_LIST:
-            panels[key] = _feature_panel(store, features, key, label, icon)
+            panels[key] = _feature_panel(
+                store, features, key, label, icon,
+                on_changed=lambda v, k=key: state_labels[k].set_text("On" if v else "Off"),
+            )
 
         with dropdown_list:
             for key, label, icon in FEATURE_LIST:
@@ -383,7 +409,7 @@ def _features_dropdown(store: dict, features: dict):
                         ui.icon(icon, size="14px").style("color:#4B5563;")
                         ui.label(label).classes("text-sm text-gray-700")
                     with ui.row().classes("items-center gap-2"):
-                        ui.label("On" if features.get(key) else "Off").classes("text-[10px] font-semibold text-gray-400")
+                        state_labels[key] = ui.label("On" if features.get(key) else "Off").classes("text-[10px] font-semibold text-gray-400")
                         ui.icon("arrow_forward", size="12px").style("color:#D1D5DB;")
 
         def toggle_open():
@@ -394,7 +420,7 @@ def _features_dropdown(store: dict, features: dict):
         trigger.on("click", toggle_open)
 
 
-def _feature_panel(store: dict, features: dict, key: str, label: str, icon: str):
+def _feature_panel(store: dict, features: dict, key: str, label: str, icon: str, on_changed=None):
     """A right-side slide-out dialog for a single feature, matching the
     JSX fixed inset-0 overlay + w-80 side panel."""
     with ui.dialog() as dialog:
@@ -410,11 +436,7 @@ def _feature_panel(store: dict, features: dict, key: str, label: str, icon: str)
                 ui.label("Enabled for this store").classes("text-sm font-medium text-gray-700")
                 sw = ui.switch(value=bool(features.get(key))).props("color=grey-8")
 
-                def on_change(e, k=key):
-                    repo.update_features(store["$id"], **{k: e.value})
-                    features[k] = e.value
-
-                sw.on_value_change(on_change)
+                sw.on_value_change(_make_feature_toggle_handler(store["$id"], key, label, features, on_changed))
 
             ui.label(f"When on, shoppers can ask your AI assistant to {label.lower()} directly in chat.").classes(
                 "text-xs text-gray-500 leading-relaxed"
@@ -851,6 +873,7 @@ def dashboard_page():
                 ("menu_book", "Manage FAQs", "Add or edit knowledge base", "knowledge"),
                 ("storefront", "Store Information", "Update your store details", "store"),
                 ("smart_toy", "AI Agent Settings", "Name, instructions & status", "agent"),
+                ("bar_chart", "Analytics", "Chat usage, products & sales", "analytics"),
             ]
             for icon, title, sub, page in quick:
                 with ui.row().classes("w-full items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer hover:bg-gray-50").on(
@@ -866,6 +889,814 @@ def dashboard_page():
                     ui.icon("arrow_forward", size="13px").style("color:#D1D5DB;")
 
         ui.label("© 2024 RenderLink AI Assistant. All rights reserved.").classes("text-center text-xs text-gray-400 mt-2 w-full")
+
+
+# --------------------------------------------------------------------
+# FEATURE TOGGLES — every switch writes to the database and then
+# RE-READS it to verify the change really persisted. If the save fails,
+# the switch snaps back and the merchant is told, so the UI can never
+# show "On" while the stored value says "Off".
+#
+# Your chat/widget backend should gate each capability with
+# is_feature_enabled(store_id, "<feature_key>") (keys = FEATURE_LIST).
+# --------------------------------------------------------------------
+def is_feature_enabled(store_id: str, key: str) -> bool:
+    """Single source of truth for 'is this feature on for this store?'.
+    Fails closed (False) if the lookup errors."""
+    try:
+        return bool(repo.ensure_features(store_id).get(key))
+    except Exception:
+        logger.exception("is_feature_enabled failed for %s", key)
+        return False
+
+
+def _set_feature(store_id: str, key: str, value: bool, features: dict | None = None) -> bool:
+    value = bool(value)
+    try:
+        repo.update_features(store_id, **{key: value})
+        saved = repo.ensure_features(store_id)
+        if bool(saved.get(key)) != value:
+            raise RuntimeError("feature change did not persist")
+    except Exception:
+        logger.exception("Saving feature %s failed", key)
+        ui.notify("Couldn't save that change — please try again.", type="negative")
+        return False
+    if features is not None:
+        features[key] = value
+    return True
+
+
+def _make_feature_toggle_handler(store_id: str, key: str, label: str, features: dict, on_changed=None):
+    state = {"reverting": False}
+
+    def handler(e):
+        if state["reverting"]:  # this event is our own rollback
+            state["reverting"] = False
+            return
+        new_value = bool(e.value)
+        if _set_feature(store_id, key, new_value, features):
+            if on_changed:
+                on_changed(new_value)
+            ui.notify(f"{label} {'enabled' if new_value else 'disabled'}", type="positive")
+        else:
+            state["reverting"] = True
+            e.sender.set_value(not new_value)
+
+    return handler
+
+
+# --------------------------------------------------------------------
+# ANALYTICS — modular data layer
+#
+# Every metric is fetched through ONE resolver, so any platform/database
+# can be plugged in without touching the UI:
+#
+#     def my_woo_views(store_id, days=14, limit=8): ...
+#     register_analytics_provider("woocommerce", "product_views", my_woo_views)
+#
+# Provider contract: fn(store_id, days=..., limit=...) (extra kwargs the
+# function doesn't accept are dropped automatically). Metrics:
+#   chat_summary, chat_usage_daily, product_views, product_searches,
+#   product_purchases, sales_daily, category_popularity, agent_cart_adds
+# A store's platform is read from store["platform"] (default "shopify").
+# With no custom provider, the matching repository_appwrite function is
+# used if it exists; if neither exists the UI says "not available" —
+# nothing is ever invented. Results are normalised to whitelisted
+# fields only, so personal data (emails, customer names...) can't leak
+# into the dashboard.
+# --------------------------------------------------------------------
+ANALYTICS_RANGES = {7: "Last 7 days", 14: "Last 14 days", 30: "Last 30 days", 90: "Last 90 days"}
+
+_REPO_METRICS = {
+    "chat_summary": "get_chat_summary",
+    "chat_usage_daily": "get_chat_usage_by_day",
+    "product_views": "get_top_viewed_products",
+    "product_searches": "get_top_searched_products",
+    "product_purchases": "get_top_purchased_products",
+    "sales_daily": "get_sales_by_day",
+    "category_popularity": "get_category_popularity",
+    "agent_cart_adds": "get_agent_conversions_by_day",
+}
+
+_PROVIDERS: dict = {}
+
+
+def register_analytics_provider(platform: str, metric: str, fn) -> None:
+    """Plug a data source in for one platform + metric (see block docs)."""
+    _PROVIDERS.setdefault(platform.lower(), {})[metric] = fn
+
+
+def _resolve_provider(store: dict, metric: str):
+    platform = str(store.get("platform") or "shopify").lower()
+    custom = _PROVIDERS.get(platform, {}).get(metric)
+    return custom or getattr(repo, _REPO_METRICS[metric], None)
+
+
+def _result(ok=False, data=None, reason="", date_filtered=True) -> dict:
+    return {"ok": ok, "data": data, "reason": reason, "date_filtered": date_filtered}
+
+
+def _invoke(fn, store_id, **kwargs):
+    """Calls fn passing only the kwargs it accepts. Returns (value, kwargs_used)."""
+    try:
+        params = inspect.signature(fn).parameters
+        takes_any = any(p.kind == p.VAR_KEYWORD for p in params.values())
+        usable = {k: v for k, v in kwargs.items() if takes_any or k in params}
+    except (TypeError, ValueError):
+        usable = dict(kwargs)
+    try:
+        return fn(store_id, **usable), usable
+    except TypeError:
+        if not usable:
+            raise
+        return fn(store_id), {}
+
+
+# ---- normalisers (whitelist fields + strip anything personal) ----
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_PHONE_RE = re.compile(r"(?:\d[\s().+-]*){9,}")
+_NAME_KEYS = ("name", "title", "product", "product_title", "product_name", "category", "label")
+_COUNT_KEYS = ("count", "views", "searches", "purchases", "quantity", "units", "orders", "total", "value")
+_SUMMARY_ALIASES = {
+    "visitors": ("total_visitors", "visitors", "total_users"),
+    "unique_users": ("unique_users", "unique_visitors"),
+    "sessions": ("sessions", "chat_sessions", "total_sessions"),
+    "messages": ("messages", "total_messages", "message_count"),
+}
+_DAILY_ALIASES = {
+    "chat_usage_daily": {
+        "sessions": ("sessions", "chat_sessions", "conversations"),
+        "messages": ("messages", "message_count"),
+        "unique_users": ("unique_users", "unique_visitors"),
+    },
+    "sales_daily": {
+        "orders": ("orders", "order_count", "count"),
+        "revenue": ("revenue", "sales", "total_sales", "amount"),
+    },
+    "agent_cart_adds": {"count": ("count", "cart_adds", "total")},
+}
+
+
+def _safe_label(value, max_len: int = 60):
+    text = str(value or "").strip()
+    if not text or _EMAIL_RE.search(text) or _PHONE_RE.search(text):
+        return None
+    return text[:max_len]
+
+
+def _to_number(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    try:
+        return float(str(v).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _norm_ranked(raw, limit: int = 8):
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        raw = list(raw.items())
+    if not isinstance(raw, (list, tuple)):
+        return None
+    out = []
+    for item in raw:
+        name = count = None
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            name, count = item[0], _to_number(item[1])
+        elif isinstance(item, dict):
+            name = next((item[k] for k in _NAME_KEYS if item.get(k)), None)
+            count = next((n for n in (_to_number(item.get(k)) for k in _COUNT_KEYS) if n is not None), None)
+        label = _safe_label(name)
+        if label is None or count is None or count <= 0:
+            continue
+        out.append((label, count))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return out[:limit]
+
+
+def _norm_summary(raw):
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for field, keys in _SUMMARY_ALIASES.items():
+        out[field] = next((n for n in (_to_number(raw.get(k)) for k in keys) if n is not None), None)
+    return out
+
+
+def _parse_day(v):
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except ValueError:
+        return None
+
+
+def _make_daily_normaliser(metric: str):
+    aliases = _DAILY_ALIASES[metric]
+
+    def norm(raw):
+        if not isinstance(raw, (list, tuple)):
+            return None
+        rows, fields = {}, []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            d = _parse_day(item.get("date") or item.get("day"))
+            if d is None:
+                continue
+            row = rows.setdefault(d, {})
+            for field, keys in aliases.items():
+                n = next((x for x in (_to_number(item.get(k)) for k in keys) if x is not None), None)
+                if n is not None:
+                    row[field] = row.get(field, 0) + n
+                    if field not in fields:
+                        fields.append(field)
+            cur = item.get("currency")
+            if isinstance(cur, str) and 2 <= len(cur) <= 4:
+                row["_currency"] = cur.upper()
+        return {"fields": fields, "rows": rows}
+
+    return norm
+
+
+_NORMALISERS = {
+    "chat_summary": _norm_summary,
+    "chat_usage_daily": _make_daily_normaliser("chat_usage_daily"),
+    "product_views": _norm_ranked,
+    "product_searches": _norm_ranked,
+    "product_purchases": _norm_ranked,
+    "sales_daily": _make_daily_normaliser("sales_daily"),
+    "category_popularity": _norm_ranked,
+    "agent_cart_adds": _make_daily_normaliser("agent_cart_adds"),
+}
+
+
+def fetch_metric(store: dict, metric: str, days: int) -> dict:
+    """Fetches + normalises ONE metric for a store. Never raises."""
+    fn = _resolve_provider(store, metric)
+    if fn is None:
+        return _result(reason="No data source is connected for this metric yet.")
+    try:
+        raw, used = _invoke(fn, store["$id"], days=days, limit=8)
+    except Exception:
+        logger.exception("Analytics metric %s failed", metric)
+        return _result(reason="This data couldn't be loaded right now.")
+    try:
+        data = _NORMALISERS[metric](raw)
+    except Exception:
+        logger.exception("Analytics metric %s returned bad data", metric)
+        data = None
+    if data is None:
+        return _result(reason="The data source returned an unexpected format.")
+    return _result(True, data, date_filtered="days" in used)
+
+
+def load_analytics(store: dict, days: int) -> dict:
+    """Blocking — run via run.io_bound(). Scoped to the logged-in store only."""
+    sid = store["$id"]
+    bundle = {"days": days, "metrics": {m: fetch_metric(store, m, days) for m in _REPO_METRICS}}
+    try:
+        bundle["features"] = dict(repo.ensure_features(sid))
+    except Exception:
+        bundle["features"] = {}
+    try:
+        bundle["faq_count"] = len(repo.list_faqs(sid))
+    except Exception:
+        bundle["faq_count"] = None
+    return bundle
+
+
+# ---- derived helpers ----
+def _metric(b: dict, key: str) -> dict:
+    return b["metrics"].get(key) or _result(reason="No data source is connected for this metric yet.")
+
+
+def _data(b: dict, key: str):
+    m = _metric(b, key)
+    return m["data"] if m["ok"] else None
+
+
+def _to_series(norm: dict, days: int) -> list:
+    """Dense day-by-day rows. A day with no logged events is a real zero."""
+    end = datetime.now(timezone.utc).date()
+    if norm["rows"]:
+        end = max(end, max(norm["rows"]))
+    start = end - timedelta(days=days - 1)
+    series = []
+    for i in range(days):
+        d = start + timedelta(days=i)
+        src = norm["rows"].get(d, {})
+        row = {"date": d.isoformat()}
+        for f in norm["fields"]:
+            row[f] = src.get(f, 0)
+        series.append(row)
+    return series
+
+
+def _aggregate(series: list, fields: list, grain: str) -> list:
+    if grain != "weekly":
+        return [{"label": r["date"][5:], **{f: r[f] for f in fields}} for r in series]
+    buckets = {}
+    for r in series:
+        d = date.fromisoformat(r["date"])
+        wk = d - timedelta(days=d.weekday())
+        bucket = buckets.setdefault(wk, {f: 0 for f in fields})
+        for f in fields:
+            bucket[f] += r[f]
+    return [{"label": f"Wk {wk.strftime('%m-%d')}", **vals} for wk, vals in sorted(buckets.items())]
+
+
+def _series_total(b: dict, key: str, field: str):
+    data = _data(b, key)
+    if not data or field not in data["fields"]:
+        return None
+    return sum(row.get(field, 0) for row in data["rows"].values()
+               if row.get(field) is not None)
+
+
+def _derive_kpis(b: dict) -> dict:
+    summary = _data(b, "chat_summary") or {}
+    k = {f: summary.get(f) for f in ("visitors", "unique_users", "sessions", "messages")}
+    # Fall back to summing the daily series (real data) when the summary is missing.
+    if k["sessions"] is None:
+        k["sessions"] = _series_total(b, "chat_usage_daily", "sessions")
+    if k["messages"] is None:
+        k["messages"] = _series_total(b, "chat_usage_daily", "messages")
+    k["msgs_per_session"] = (k["messages"] / k["sessions"]) if k["sessions"] and k["messages"] is not None else None
+    k["cart_adds"] = _series_total(b, "agent_cart_adds", "count")
+    k["orders"] = _series_total(b, "sales_daily", "orders")
+    k["revenue"] = _series_total(b, "sales_daily", "revenue")
+    sales = _data(b, "sales_daily")
+    k["currency"] = next((r["_currency"] for r in (sales or {"rows": {}})["rows"].values() if r.get("_currency")), "")
+    return k
+
+
+def _halves(b: dict, key: str, field: str):
+    """(first-half total, second-half total) of the period, or None if too short."""
+    data = _data(b, key)
+    if not data or field not in data["fields"]:
+        return None
+    series = _to_series(data, b["days"])
+    if len(series) < 6:
+        return None
+    mid = len(series) // 2
+    first = sum(r[field] for r in series[:mid])
+    second = sum(r[field] for r in series[mid:])
+    return (first, second) if (first + second) > 0 else None
+
+
+# --------------------------------------------------------------------
+# AI tips — rule-based analysis of the retrieved data. Add smarter
+# generators (e.g. an LLM call) with register_tip_generator(fn);
+# fn(bundle, features) -> [{"level","icon","title","detail"}].
+# --------------------------------------------------------------------
+_TIP_GENERATORS: list = []
+_TIP_ORDER = {"warning": 0, "opportunity": 1, "good": 2, "info": 3}
+_TIP_COLORS = {"warning": "#DC2626", "opportunity": "#D97706", "good": "#16A34A", "info": "#6B7280"}
+
+
+def register_tip_generator(fn) -> None:
+    _TIP_GENERATORS.append(fn)
+
+
+def _rule_based_tips(b: dict, features: dict) -> list:
+    tips = []
+
+    def add(level, icon, title, detail):
+        tips.append({"level": level, "icon": icon, "title": title, "detail": detail})
+
+    searches, views = _data(b, "product_searches"), _data(b, "product_views")
+    purchases, categories = _data(b, "product_purchases"), _data(b, "category_popularity")
+    k = _derive_kpis(b)
+
+    # 1) One product dominating shopper interest
+    if searches:
+        total = sum(c for _, c in searches)
+        name, count = searches[0]
+        if total >= 5 and count / total >= 0.3:
+            add("opportunity", "trending_up", f"“{name}” is your most-searched product",
+                f"It makes up {count / total:.0%} of top product searches. Feature it on your homepage "
+                "and make sure it's well stocked.")
+
+    # 2) Interest that isn't converting
+    bought = {n.lower() for n, _ in (purchases or [])}
+    if purchases is not None:
+        for source, label in ((views, "viewed"), (searches, "searched")):
+            lagging = [n for n, _ in (source or [])[:5] if n.lower() not in bought]
+            if lagging:
+                add("opportunity", "shopping_bag", f"Often {label}, but not among your top purchases",
+                    f"{', '.join(lagging[:3])}. Review price, photos, description and stock — "
+                    "these are your best chances to lift sales.")
+                break
+
+    # 3) Weakest sellers / categories
+    if purchases and len(purchases) >= 4:
+        n, c = purchases[-1]
+        add("info", "trending_down", f"“{n}” is the weakest of your top sellers ({c:g} sold)",
+            "Consider a bundle, discount, or having the assistant recommend it alongside a best seller.")
+    if categories and len(categories) >= 2:
+        total = sum(c for _, c in categories)
+        (top_n, top_c), (low_n, low_c) = categories[0], categories[-1]
+        if total and top_c / total >= 0.5:
+            add("info", "category", f"“{top_n}” drives {top_c / total:.0%} of category interest",
+                f"“{low_n}” lags behind — try promoting it to broaden what shoppers explore.")
+
+    # 4) Trends
+    for key, field, label, down_tip in (
+        ("sales_daily", "revenue", "Sales", "Check recent price, stock or traffic changes."),
+        ("sales_daily", "orders", "Orders", "Check recent price, stock or traffic changes."),
+        ("agent_cart_adds", "count", "Assistant cart adds", "Review your welcome message and product answers."),
+        ("chat_usage_daily", "sessions", "Chat sessions", "Make the chat bubble more visible on your storefront."),
+    ):
+        if key == "sales_daily" and field == "orders" and _halves(b, key, "revenue"):
+            continue  # don't repeat the revenue tip
+        h = _halves(b, key, field)
+        if not h:
+            continue
+        first, second = h
+        if first > 0 and second < first * 0.8:
+            add("warning", "south_east", f"{label} are down {1 - second / first:.0%} vs. the first half of this period", down_tip)
+        elif second > first * 1.2 and first >= 0:
+            pct = f"{second / first - 1:.0%}" if first else "from zero"
+            add("good", "north_east", f"{label} are up {pct} vs. the first half of this period",
+                "Whatever you changed recently is working — keep it going.")
+
+    # 5) Engagement quality
+    if k["sessions"] and k["sessions"] >= 10:
+        if k["msgs_per_session"] is not None and k["msgs_per_session"] < 2:
+            add("opportunity", "chat", "Most conversations end after one message",
+                "Make your welcome message more specific and add FAQs so the assistant can keep the conversation going.")
+        if k["cart_adds"] == 0 and features.get("cart_editing"):
+            add("opportunity", "add_shopping_cart", "Shoppers are chatting but nobody added to cart via the assistant",
+                "Make sure product answers include clear next steps, and test the add-to-cart flow on your storefront.")
+
+    # 6) Setup gaps tied to growth
+    if not features.get("recommendations"):
+        add("opportunity", "auto_awesome", "Recommendations is turned off",
+            "Turning it on lets the assistant suggest related products — a direct way to raise order value.")
+    if not features.get("product_search"):
+        add("opportunity", "search", "Product Search is turned off",
+            "Shoppers can't ask the assistant to find products, which limits what you can learn and sell.")
+    if b.get("faq_count") == 0:
+        add("opportunity", "menu_book", "You haven't added any FAQs yet",
+            "Shipping, returns and sizing questions are common — answering them instantly keeps shoppers moving.")
+    return tips
+
+
+_TIP_GENERATORS.append(_rule_based_tips)
+
+
+def generate_merchant_tips(b: dict, features: dict, limit: int = 8) -> list:
+    seen, tips = set(), []
+    for gen in _TIP_GENERATORS:
+        try:
+            for t in gen(b, features) or []:
+                if t.get("title") and t["title"] not in seen:
+                    seen.add(t["title"])
+                    tips.append(t)
+        except Exception:
+            logger.exception("Tip generator failed")
+    tips.sort(key=lambda t: _TIP_ORDER.get(t.get("level"), 9))
+    return tips[:limit]
+
+
+# --------------------------------------------------------------------
+# ANALYTICS — UI helpers
+# --------------------------------------------------------------------
+_CHART_COLORS = ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937", "#D1D5DB", "#111827", "#E5E7EB"]
+_METRIC_LABELS = {
+    "chat_summary": "Chat totals", "chat_usage_daily": "Daily chat usage", "product_views": "Product views",
+    "product_searches": "Product searches", "product_purchases": "Purchases", "sales_daily": "Sales trend",
+    "category_popularity": "Category popularity", "agent_cart_adds": "Assistant cart adds",
+}
+
+
+def _fmt(v, decimals: int = 0) -> str:
+    if v is None:
+        return "—"
+    return f"{v:,.{decimals}f}" if (decimals or v != int(v)) else f"{int(v):,}"
+
+
+def _section_card(title: str, icon: str, note: str = ""):
+    card = ui.card().classes(CARD_CLASSES + " p-5 gap-2")
+    with card:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon(icon, size="17px").style(f"color:{BRAND};")
+            ui.label(title).classes("font-bold text-gray-900 text-sm")
+        if note:
+            ui.label(note).classes("text-[11px] text-gray-400 -mt-1")
+    return card
+
+
+def _empty_state(title: str, detail: str = "", icon: str = "inbox"):
+    with ui.column().classes("w-full items-center py-8 gap-1"):
+        ui.icon(icon, size="28px").style("color:#D1D5DB;")
+        ui.label(title).classes("text-sm font-semibold text-gray-500 text-center")
+        if detail:
+            ui.label(detail).classes("text-xs text-gray-400 text-center max-w-md")
+
+
+def _unavailable_state(reason: str):
+    _empty_state("Data not available", reason, icon="link_off")
+
+
+def _unfiltered_note(m: dict):
+    if m["ok"] and not m["date_filtered"]:
+        ui.label("This data source doesn't support date filtering, so all-time figures are shown.").classes(
+            "text-[11px] text-amber-600"
+        )
+
+
+def _kpi_card(icon: str, label: str, value, sub: str = "", reason: str = ""):
+    available = value is not None
+    with ui.card().classes(CARD_CLASSES + " p-4 gap-1"):
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            with ui.element("div").classes("w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0").style(
+                f"background:{BRAND_SOFT};"
+            ):
+                ui.icon(icon, size="14px").style(f"color:{BRAND};")
+            ui.label(label).classes("text-xs text-gray-500")
+        ui.label(value if available else "—").classes(
+            "text-2xl font-bold " + ("text-gray-900" if available else "text-gray-300")
+        )
+        ui.label(sub if available else (reason or "Data not available")).classes("text-[11px] text-gray-400")
+
+
+def _bar_chart(items: list, color: str = "#6B7280"):
+    labels = [n for n, _ in reversed(items)]
+    counts = [c for _, c in reversed(items)]
+    ui.echart({
+        "grid": {"left": 130, "right": 20, "top": 6, "bottom": 6, "containLabel": False},
+        "xAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                  "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+        "yAxis": {"type": "category", "data": labels, "axisLabel": {"fontSize": 10, "width": 120, "overflow": "truncate"}},
+        "series": [{"type": "bar", "data": counts, "itemStyle": {"color": color, "borderRadius": [0, 4, 4, 0]}, "barMaxWidth": 16}],
+        "tooltip": {"trigger": "axis"},
+    }).classes("w-full").style(f"height:{max(180, 30 * len(items) + 20)}px;")
+
+
+def _line_series(name: str, data: list, color: str, area: bool = False, **extra) -> dict:
+    s = {"name": name, "type": "line", "smooth": True, "symbolSize": 5, "data": data,
+         "itemStyle": {"color": color}, "lineStyle": {"color": color, "width": 2}}
+    if area:
+        s["areaStyle"] = {"color": color, "opacity": 0.08}
+    s.update(extra)
+    return s
+
+
+def _trend_chart(rows: list, defs: list):
+    """defs: [(field, display name, colour)]"""
+    option = {
+        "grid": {"left": 40, "right": 16, "top": 30 if len(defs) > 1 else 12, "bottom": 24},
+        "xAxis": {"type": "category", "data": [r["label"] for r in rows], "axisLabel": {"fontSize": 10},
+                  "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
+        "yAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                  "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+        "series": [_line_series(name, [r[f] for r in rows], color, area=(i == 0))
+                   for i, (f, name, color) in enumerate(defs)],
+        "tooltip": {"trigger": "axis"},
+    }
+    if len(defs) > 1:
+        option["legend"] = {"top": 0, "textStyle": {"fontSize": 10}}
+    ui.echart(option).classes("w-full").style("height:220px;")
+
+
+def _ranked_card(b: dict, key: str, title: str, icon: str, empty_title: str, empty_detail: str, color: str):
+    m = _metric(b, key)
+    with _section_card(title, icon, f"{ANALYTICS_RANGES.get(b['days'], '')}" if m["ok"] and m["date_filtered"] else ""):
+        if not m["ok"]:
+            _unavailable_state(m["reason"])
+        elif not m["data"]:
+            _empty_state(empty_title, empty_detail)
+        else:
+            _bar_chart(m["data"], color)
+            _unfiltered_note(m)
+
+
+# --------------------------------------------------------------------
+# ANALYTICS — page
+# --------------------------------------------------------------------
+def _render_analytics(b: dict, grain: str):
+    k = _derive_kpis(b)
+    cur = k["currency"]
+
+    # ---- KPI cards ----
+    with ui.element("div").classes("w-full grid grid-cols-2 md:grid-cols-4 gap-3"):
+        _kpi_card("groups", "Total visitors", _fmt(k["visitors"]) if k["visitors"] is not None else None,
+                  "Chat widget visitors", "Not tracked yet")
+        _kpi_card("person", "Unique users", _fmt(k["unique_users"]) if k["unique_users"] is not None else None,
+                  "Distinct chat users", "Not tracked yet")
+        _kpi_card("forum", "Chat sessions", _fmt(k["sessions"]) if k["sessions"] is not None else None,
+                  "Conversations started", "Not tracked yet")
+        _kpi_card("chat_bubble_outline", "Messages", _fmt(k["messages"]) if k["messages"] is not None else None,
+                  "Sent in chat", "Not tracked yet")
+        _kpi_card("swap_horiz", "Msgs / session",
+                  _fmt(k["msgs_per_session"], 1) if k["msgs_per_session"] is not None else None,
+                  "Average depth of a chat", "Needs sessions + messages")
+        _kpi_card("add_shopping_cart", "Assistant cart adds",
+                  _fmt(k["cart_adds"]) if k["cart_adds"] is not None else None,
+                  ANALYTICS_RANGES.get(b["days"], ""), "Not tracked yet")
+        _kpi_card("receipt_long", "Orders", _fmt(k["orders"]) if k["orders"] is not None else None,
+                  ANALYTICS_RANGES.get(b["days"], ""), "Order data not connected")
+        _kpi_card("payments", "Revenue",
+                  (f"{cur} " if cur else "") + _fmt(k["revenue"], 2) if k["revenue"] is not None else None,
+                  ANALYTICS_RANGES.get(b["days"], ""), "Sales data not connected")
+
+    # ---- Tips ----
+    tips = generate_merchant_tips(b, b.get("features", {}))
+    with _section_card("Tips for your store", "lightbulb",
+                       "Automatically generated from the data on this page — nothing is guessed."):
+        if not tips:
+            _empty_state("Not enough data for tips yet",
+                         "As shoppers use your assistant, personalised recommendations will show up here.",
+                         icon="lightbulb")
+        for t in tips:
+            color = _TIP_COLORS.get(t["level"], "#6B7280")
+            with ui.row().classes("w-full items-start gap-3 px-3 py-2.5 rounded-xl no-wrap").style("background:#F9FAFB;"):
+                ui.icon(t.get("icon", "info"), size="18px").style(f"color:{color};margin-top:2px;")
+                with ui.column().classes("gap-0"):
+                    ui.label(t["title"]).classes("text-sm font-semibold text-gray-800")
+                    ui.label(t["detail"]).classes("text-xs text-gray-500")
+
+    # ---- Chatbot usage trend ----
+    usage = _metric(b, "chat_usage_daily")
+    with _section_card("Chatbot usage", "forum", f"{grain.title()} sessions and messages · {ANALYTICS_RANGES.get(b['days'], '')}"):
+        if not usage["ok"]:
+            _unavailable_state(usage["reason"])
+        else:
+            series = _to_series(usage["data"], b["days"])
+            fields = [f for f in ("sessions", "messages", "unique_users") if f in usage["data"]["fields"]]
+            if grain == "weekly":
+                fields = [f for f in fields if f != "unique_users"]  # uniques can't be summed across days
+            if not fields or not any(r[f] for r in series for f in fields):
+                _empty_state("No chat activity in this period",
+                             "Once shoppers start chatting, usage trends will appear here.")
+            else:
+                names = {"sessions": ("Sessions", "#4B5563"), "messages": ("Messages", "#9CA3AF"),
+                         "unique_users": ("Unique users", "#1F2937")}
+                _trend_chart(_aggregate(series, fields, grain), [(f, *names[f]) for f in fields])
+                _unfiltered_note(usage)
+
+    # ---- Sales trend ----
+    sales = _metric(b, "sales_daily")
+    with _section_card("Sales trend", "show_chart", f"{grain.title()} · {ANALYTICS_RANGES.get(b['days'], '')}"):
+        if not sales["ok"]:
+            _unavailable_state(sales["reason"])
+        else:
+            series = _to_series(sales["data"], b["days"])
+            fields = [f for f in ("revenue", "orders") if f in sales["data"]["fields"]]
+            if not fields or not any(r[f] for r in series for f in fields):
+                _empty_state("No sales in this period", "Sales will appear here once orders are recorded.")
+            else:
+                rows = _aggregate(series, fields, grain)
+                option = {
+                    "grid": {"left": 44, "right": 44 if len(fields) > 1 else 16, "top": 30, "bottom": 24},
+                    "legend": {"top": 0, "textStyle": {"fontSize": 10}},
+                    "xAxis": {"type": "category", "data": [r["label"] for r in rows], "axisLabel": {"fontSize": 10},
+                              "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
+                    "yAxis": [{"type": "value", "axisLabel": {"fontSize": 10}, "splitLine": {"lineStyle": {"color": "#F3F4F6"}}}],
+                    "series": [],
+                    "tooltip": {"trigger": "axis"},
+                }
+                if "revenue" in fields:
+                    option["series"].append(_line_series("Revenue" + (f" ({cur})" if cur else ""),
+                                                         [r["revenue"] for r in rows], "#4B5563", area=True))
+                if "orders" in fields:
+                    if "revenue" in fields:
+                        option["yAxis"].append({"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
+                                                "splitLine": {"show": False}})
+                    option["series"].append({"name": "Orders", "type": "bar", "barMaxWidth": 18,
+                                             "yAxisIndex": 1 if "revenue" in fields else 0,
+                                             "data": [r["orders"] for r in rows],
+                                             "itemStyle": {"color": "#D1D5DB", "borderRadius": [4, 4, 0, 0]}})
+                ui.echart(option).classes("w-full").style("height:240px;")
+                _unfiltered_note(sales)
+
+    # ---- Assistant cart adds trend ----
+    cart = _metric(b, "agent_cart_adds")
+    with _section_card("Assistant-driven cart adds", "add_shopping_cart",
+                       f"{grain.title()} · {ANALYTICS_RANGES.get(b['days'], '')}"):
+        if not cart["ok"]:
+            _unavailable_state(cart["reason"])
+        else:
+            series = _to_series(cart["data"], b["days"])
+            if "count" not in cart["data"]["fields"] or not any(r["count"] for r in series):
+                _empty_state("No assistant cart adds in this period",
+                             "Items shoppers add to cart through the assistant will show up here.")
+            else:
+                _trend_chart(_aggregate(series, ["count"], grain), [("count", "Cart adds", "#4B5563")])
+                _unfiltered_note(cart)
+
+    # ---- Products ----
+    _ranked_card(b, "product_views", "Most-viewed products", "visibility",
+                 "No product views recorded in this period", "Views are counted when shoppers open a product.", "#4B5563")
+    _ranked_card(b, "product_searches", "Top product searches", "search",
+                 "No product searches recorded in this period", "Searches made through the assistant appear here.", "#6B7280")
+    _ranked_card(b, "product_purchases", "Most-purchased products", "shopping_bag",
+                 "No purchases recorded in this period", "Purchased products will be ranked here.", "#374151")
+
+    # ---- Category popularity ----
+    cat = _metric(b, "category_popularity")
+    with _section_card("Product popularity by category", "category"):
+        if not cat["ok"]:
+            _unavailable_state(cat["reason"])
+        elif not cat["data"]:
+            _empty_state("No category activity recorded in this period",
+                         "Category interest appears once products are viewed, searched or bought.")
+        else:
+            ui.echart({
+                "tooltip": {"trigger": "item"},
+                "legend": {"bottom": 0, "textStyle": {"fontSize": 10}},
+                "series": [{"type": "pie", "radius": ["35%", "70%"],
+                            "data": [{"value": c, "name": n} for n, c in cat["data"]],
+                            "label": {"fontSize": 10},
+                            "itemStyle": {"borderRadius": 4, "borderColor": "#fff", "borderWidth": 2}}],
+                "color": _CHART_COLORS,
+            }).classes("w-full").style("height:280px;")
+            _unfiltered_note(cat)
+
+    # ---- Data coverage (transparency) ----
+    missing = [_METRIC_LABELS[m] for m, r in b["metrics"].items() if not r["ok"]]
+    if missing:
+        ui.label("Not available yet (no data source connected or loading failed): " + ", ".join(missing)).classes(
+            "text-[11px] text-gray-400"
+        )
+
+
+@ui.page("/dashboard/analytics")
+async def analytics_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+    client = ui.context.client
+
+    saved_days = app.storage.user.get("analytics_days", 14)
+    state = {"days": saved_days if saved_days in ANALYTICS_RANGES else 14, "grain": "daily", "bundle": None, "req": 0}
+
+    content = _layout("analytics", store, cfg)
+    with content:
+        _page_header("Analytics", "How shoppers use your assistant and what they're interested in.")
+
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.select(
+                ANALYTICS_RANGES, value=state["days"],
+                on_change=lambda e: on_range(e.value),
+            ).props("dense outlined options-dense").style("min-width:170px;")
+            ui.toggle(
+                {"daily": "Daily", "weekly": "Weekly"}, value=state["grain"],
+                on_change=lambda e: on_grain(e.value),
+            ).props("no-caps dense unelevated toggle-color=grey-8")
+            ui.button(icon="refresh", on_click=lambda: refresh()).props("flat round dense").style("color:#6B7280;")
+
+        body = ui.column().classes("w-full gap-4")
+
+    def render():
+        body.clear()
+        with body:
+            if state["bundle"] is not None:
+                _render_analytics(state["bundle"], state["grain"])
+
+    async def refresh():
+        state["req"] += 1
+        my_req = state["req"]
+        body.clear()
+        with body:
+            with ui.row().classes("w-full items-center justify-center py-16 gap-3"):
+                ui.spinner(size="lg").props("color=grey-7")
+                ui.label("Loading analytics…").classes("text-sm text-gray-500")
+        try:
+            bundle = await run.io_bound(load_analytics, store, state["days"])
+        except Exception:
+            logger.exception("Loading analytics failed")
+            body.clear()
+            with body:
+                _empty_state("Couldn't load analytics", "Please try again in a moment.", icon="error_outline")
+            return
+        if my_req != state["req"]:
+            return  # a newer request superseded this one
+        state["bundle"] = bundle
+        render()
+
+    async def on_range(value):
+        state["days"] = int(value)
+        app.storage.user["analytics_days"] = state["days"]
+        await refresh()
+
+    def on_grain(value):
+        state["grain"] = value
+        if state["bundle"] is not None:
+            render()
+
+    await client.connected()  # so the loading spinner is visible while data loads
+    await refresh()
 
 
 # --------------------------------------------------------------------
@@ -1079,9 +1910,7 @@ def features_page():
                             ui.icon(icon, size="15px").style("color:#4B5563;")
                             ui.label(label).classes("text-sm font-medium text-gray-700")
 
-                        def on_toggle(e, k=key):
-                            repo.update_features(store["$id"], **{k: e.value})
-
+                        on_toggle = _make_feature_toggle_handler(store["$id"], key, label, features)
                         ui.switch(value=bool(features.get(key)), on_change=on_toggle).props("color=grey-8")
 
 
@@ -1250,3 +2079,5 @@ def feedback_page():
             ui.button("Send feedback", on_click=send).props("no-caps").classes("mt-1").style(
                 f"background:{BRAND};color:white;border-radius:10px;"
             )
+dashboard_nicegui-2.py
+Displaying dashboard_nicegui-2.py.
