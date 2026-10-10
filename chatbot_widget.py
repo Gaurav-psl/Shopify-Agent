@@ -170,6 +170,7 @@ class ChatRequest(BaseModel):
     session_id: str = "anonymous"
     shop: str
     customer_token: str | None = None
+    visitor_id: str | None = None  # >>> ADDED (analytics)
 
 
 class ConfirmRequest(BaseModel):
@@ -177,6 +178,7 @@ class ConfirmRequest(BaseModel):
     session_id: str = "anonymous"
     confirmed: bool
     customer_token: str | None = None
+    visitor_id: str | None = None  # >>> ADDED (analytics)
 
 
 _CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
@@ -202,6 +204,15 @@ def _get_store(shop: str) -> SimpleNamespace | None:
     return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
 
 
+# >>> ADDED (analytics): remembers which chat session / visitor the current
+# request belongs to, so _log() below can store it with each log row.
+# Anonymous random ids only — no names, emails or other personal data.
+import contextvars
+_CURRENT_SESSION_ID = contextvars.ContextVar("analytics_session_id", default=None)
+_CURRENT_VISITOR_ID = contextvars.ContextVar("analytics_visitor_id", default=None)
+# <<< END ADDED
+
+
 def _log(shop: str, message: str, status: str, intent=None, action=None, entities=None, reply: str = "") -> None:
     """Best-effort request logging for the dashboard's Insights section.
     Must never break the actual chat response, so failures here are
@@ -211,6 +222,17 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
     ("cart_management"/"add_item", "product_search"/"search_products", ...)
     because repository_appwrite's analytics group on those exact strings."""
     try:
+        # >>> ADDED (analytics): attach anonymous session/visitor ids to the
+        # log row (stored inside the existing `entities` JSON field).
+        _sid, _vid = _CURRENT_SESSION_ID.get(), _CURRENT_VISITOR_ID.get()
+        _extra = {}
+        if _sid and _sid != "anonymous":
+            _extra["session_id"] = str(_sid)[:80]
+        if _vid:
+            _extra["visitor_id"] = str(_vid)[:80]
+        if _extra:
+            entities = {**(entities if isinstance(entities, dict) else {}), **_extra}
+        # <<< END ADDED
         repo.log_request(shop, message, status, detected_intent=intent, detected_action=action, reply=reply, entities=entities)
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: log_request failed: {e!r}")
@@ -592,6 +614,10 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
 @router.post("/chat")
 @observe(name="chat_request")
 async def chat(req: ChatRequest):
+    # >>> ADDED (analytics)
+    _CURRENT_SESSION_ID.set(req.session_id)
+    _CURRENT_VISITOR_ID.set(req.visitor_id)
+    # <<< END ADDED
     result = await _chat_impl(req)
     try:
         text = (req.message or "").strip()
@@ -812,6 +838,10 @@ async def _chat_impl(req: ChatRequest):
 @router.post("/confirm")
 @observe(name="confirm_request")
 async def confirm(req: ConfirmRequest):
+    # >>> ADDED (analytics)
+    _CURRENT_SESSION_ID.set(req.session_id)
+    _CURRENT_VISITOR_ID.set(req.visitor_id)
+    # <<< END ADDED
     store = _get_store(req.shop)
     if not store:
         return {"reply": "Sorry, I couldn't verify this store."}
@@ -1399,6 +1429,23 @@ WIDGET_JS = r"""
     }
   })();
 
+  // >>> ADDED (analytics): anonymous, random visitor id kept in the browser
+  // (localStorage) so the dashboard can count distinct visitors. Contains no
+  // personal information.
+  var VISITOR_ID = (function () {
+    try {
+      var vid = localStorage.getItem("chatVisitorId");
+      if (!vid) {
+        vid = "vis_" + Math.random().toString(36).slice(2) + Date.now();
+        localStorage.setItem("chatVisitorId", vid);
+      }
+      return vid;
+    } catch (e) {
+      return null;
+    }
+  })();
+  // <<< END ADDED
+
   var CUSTOMER_TOKEN_KEY = "aiChatCustomerToken_" + SHOP;
   var customerToken = null;
   var customerAuthenticated = false;
@@ -1644,7 +1691,7 @@ WIDGET_JS = r"""
         fetch(CFG.confirmEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed, customer_token: customerToken })
+          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed, customer_token: customerToken, visitor_id: VISITOR_ID /* ADDED (analytics) */ })
         })
           .then(function (res) { return res.json(); })
           .then(function (data) { typingEl.remove(); handleChatResponse(data); })
@@ -1922,7 +1969,7 @@ WIDGET_JS = r"""
     fetch(CFG.chatEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP, customer_token: customerToken })
+      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP, customer_token: customerToken, visitor_id: VISITOR_ID /* ADDED (analytics) */ })
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
