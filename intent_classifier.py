@@ -70,6 +70,8 @@ def build_system_prompt(schema: dict) -> str:
         "Classify the user's message into exactly one intent and exactly one action of that intent.",
         "Pick the action whose description fits best; descriptions say when NOT to use an action.",
         "If the message doesn't clearly match anything, or you're not confident, use the 'fallback' intent with the 'clarify' action.",
+        "Judge by MEANING, not exact wording: shoppers use slang, typos, short or indirect phrasing, and may mix languages (for example Hinglish). Pick the closest action even when the wording differs from every example.",
+        "If a 'Recent conversation' block is given, use it only to resolve references such as 'that one' or 'the second one'; classify ONLY the latest message.",
         "",
         "Supported intents and actions:",
     ]
@@ -107,6 +109,7 @@ def build_system_prompt(schema: dict) -> str:
         "- Only use entity keys listed for the action you chose. Omit anything the user didn't say; never invent values.",
         "- Keep text entities (product names, colors, issue descriptions) in the language the user wrote them in.",
         "- order_number: digits only, without '#'. price_min, price_max, quantity: plain numbers, no currency symbols.",
+        "- For product names and search terms, return the shopper's words with obvious typos fixed (for example 'tshirt' -> 't-shirt').",
         "",
         "Always detect the language the user wrote or spoke in, and return its ISO 639-1 code as 'language' — even if it's not English. Do not translate the user's message; only report what language it's in.",
         "",
@@ -237,17 +240,26 @@ def _fallback(confidence: float = 0.0, language: str = "en") -> dict:
 # Public API
 # ---------------------------------------------------------------------
 @observe(name="classify_intent")
-def classify_intent(user_message: str, schema: dict | None = None) -> dict:
+def classify_intent(user_message: str, schema: dict | None = None, history: list | None = None) -> dict:
     """Classify a single user message. Returns a dict matching
     classification_output_format from the schema, with requires_confirmation
     filled in from the schema (never trusted from the model's own output)."""
     schema = schema or load_schema()
 
+    # Optional context: the last few (role, text) turns, so follow-ups like
+    # "the second one" can be resolved. Only the latest message is classified.
+    user_content = user_message
+    if history:
+        convo = "\n".join(
+            f"{'Shopper' if role == 'user' else 'Assistant'}: {str(text)[:200]}" for role, text in history[-6:]
+        )
+        user_content = f"Recent conversation (context only):\n{convo}\n\nLatest message to classify:\n{user_message}"
+
     response = llm_selector.create_chat_completion(
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": _system_prompt(schema)},
-            {"role": "user", "content": user_message},
+            {"role": "user", "content": user_content},
         ],
         temperature=0,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
