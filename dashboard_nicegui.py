@@ -841,6 +841,13 @@ def dashboard_page():
             ).props("dense outlined options-dense").classes("w-full").style("max-width:280px;")
             _render_insight("cart_adds")
 
+        # ---- Analytics (KPIs, charts, tips) — built into this page so it
+        # needs no separate route. Wrapped so it can never break the page. ----
+        try:
+            _analytics_section(store)
+        except Exception:
+            logger.exception("Analytics section failed to render")
+
         # ---- Quick Actions ----
         with ui.card().classes(CARD_CLASSES + " p-5 gap-1"):
             with ui.row().classes("items-center gap-2 mb-1"):
@@ -851,7 +858,6 @@ def dashboard_page():
                 ("menu_book", "Manage FAQs", "Add or edit knowledge base", "knowledge"),
                 ("storefront", "Store Information", "Update your store details", "store"),
                 ("smart_toy", "AI Agent Settings", "Name, instructions & status", "agent"),
-                ("bar_chart", "Analytics", "Chat usage, products & sales", "analytics"),
             ]
             for icon, title, sub, page in quick:
                 with ui.row().classes("w-full items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer hover:bg-gray-50").on(
@@ -1999,7 +2005,4 @@ def _render_analytics(b: dict, grain: str):
             _unavailable_state(cart["reason"])
         else:
             series = _to_series(cart["data"], b["days"])
-            if "count" not in cart["data"]["fields"] or not any(r["count"] for r in series):
-                _empty_state("No assistant cart adds in this period",
-                             "Items shoppers add to cart through the assistant will show up here.")
-      
+            if "count" not in cart["data"]["fields"] or no
