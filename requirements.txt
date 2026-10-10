@@ -10,3 +10,5 @@ itsdangerous==2.2.0
 python-multipart==0.0.12
 nicegui>=1.4
 langfuse==4.15.4
+requests>=2.31.0
+python-dotenv>=1.0.0

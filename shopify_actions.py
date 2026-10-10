@@ -183,18 +183,33 @@ async def get_my_orders(store, entities: dict, session_id: str, customer_id: str
     return await get_customer_orders(store,customer_id,first=50)
 
 
-async def get_recommendations(store, entities: dict, session_id: str, customer_id: str | None=None) -> dict:
+async def get_recommendations(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     import customer_profiles, recommendation_engine
-    profile=(await customer_profiles.get_profile(store.shop_domain,customer_id) or {}) if customer_id else {}
+    profile = (await customer_profiles.get_profile(store.shop_domain, customer_id) or {}) if customer_id else {}
     if customer_id and not profile.get("purchased_product_ids"):
         # Stored profile missing/empty (first visit, DB not configured, sync not run yet): read the orders live.
-        live=await get_customer_orders(store,customer_id,first=50)
+        live = await get_customer_orders(store, customer_id, first=50)
         if not live.get("error"):
-            names=[i.get("name") for o in (live.get("active_orders") or [])+(live.get("past_orders") or []) for i in (o.get("items") or []) if i.get("name")]
-            profile={**profile,"purchased_product_ids":live.get("purchased_product_ids") or [],"top_types":list(dict.fromkeys(names))[:20]}
-    result=await recommendation_engine.recommend_products(store,profile,limit=6,price_max=entities.get("price_max"),category=entities.get("category"))
-    result["based_on"]={"previous_orders":bool(profile.get("purchased_product_ids")),"recent_searches":(profile.get("recent_searches") or [])[:3]}
-    if not customer_id: result["note"]="The shopper is not logged in, so these are general picks. Suggest logging in for picks based on their orders and searches."
+            names = [i.get("name") for o in (live.get("active_orders") or []) + (live.get("past_orders") or []) for i in (o.get("items") or []) if i.get("name")]
+            profile = {**profile, "purchased_product_ids": live.get("purchased_product_ids") or [], "top_types": list(dict.fromkeys(names))[:20]}
+    
+    visitor_id = entities.get("visitor_id") or entities.get("_visitor_id")
+    result = await recommendation_engine.recommend_products(
+        store,
+        customer_profile=profile,
+        visitor_id=visitor_id,
+        customer_id=customer_id,
+        limit=6,
+        price_max=entities.get("price_max"),
+        category=entities.get("category"),
+    )
+    result["based_on"] = {
+        "previous_orders": bool(profile.get("purchased_product_ids")),
+        "recent_searches": (profile.get("recent_searches") or [])[:3],
+        "website_activity": result.get("based_on", {}),
+    }
+    if not customer_id and not result.get("based_on", {}).get("user_clicks"):
+        result["note"] = "These are our trending bestsellers. Explore or click any product to get customized picks tailored to your style!"
     return result
 
 # ==========================================================================
@@ -830,6 +845,8 @@ ACTION_MAP = {
     "policy_query.answer_policy_question": answer_policy_question,
     "customer_account.get_my_orders": get_my_orders,
     "customer_account.get_recommendations": get_recommendations,
+    "product_search.get_recommendations": get_recommendations,
+    "recommendations.recommend_products": get_recommendations,
     "fallback.clarify": clarify,
 }
 
@@ -839,6 +856,6 @@ async def dispatch(intent: str, action: str, store, entities: dict, session_id: 
     fn = ACTION_MAP.get(key)
     if fn is None:
         return {"error": f"No handler registered for {key}"}
-    if intent == "customer_account":
+    if intent == "customer_account" or action in ("get_recommendations", "recommend_products"):
         return await fn(store, entities, session_id, customer_id=customer_id)
     return await fn(store, entities, session_id)

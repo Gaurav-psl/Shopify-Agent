@@ -36,7 +36,10 @@ shape) — true for anything you can point the `openai` Python SDK's
 import json
 import os
 
-from langfuse.openai import OpenAI
+try:
+    from langfuse.openai import OpenAI
+except ImportError:
+    from openai import OpenAI
 
 PRIMARY_API_KEY = os.environ.get("PRIMARY_LLM_API_KEY", "")
 PRIMARY_BASE_URL = os.environ.get("PRIMARY_LLM_BASE_URL") or None

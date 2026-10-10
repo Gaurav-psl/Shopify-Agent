@@ -59,6 +59,7 @@ from reply_generator import generate_reply
 import shopify_actions
 import customer_profiles
 import semantic
+import activity_tracker
 
 router = APIRouter(tags=["chatbot-widget"])
 
@@ -179,6 +180,20 @@ class ConfirmRequest(BaseModel):
     confirmed: bool
     customer_token: str | None = None
     visitor_id: str | None = None  # >>> ADDED (analytics)
+
+
+class TrackActivityRequest(BaseModel):
+    shop: str
+    visitor_id: str
+    session_id: str | None = ""
+    event_type: str = "product_click"
+    product_id: str | None = ""
+    product_name: str | None = ""
+    category: str | None = ""
+    sub_category: str | None = ""
+    style: str | None = ""
+    price: float | None = None
+    customer_token: str | None = None
 
 
 _CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
@@ -885,6 +900,7 @@ async def _chat_impl(req: ChatRequest):
         return {"status": "confirmation_required", "reply": confirm_reply, "language": language}
 
     try:
+        entities["visitor_id"] = req.visitor_id
         result = await _execute_and_reply(store, intent, action, entities, language, message, req.session_id, customer_id=customer_id)
         _arm_verification_if_needed(key, intent, action, entities, language, result)
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
@@ -967,6 +983,35 @@ async def customer_session(request: Request):
         await customer_profiles.save_profile(shop,customer_id,fields)
         profile={**profile,**fields}
     return {"authenticated":True,"customer_id":str(customer_id),"customer_token":token,"first_name":(customer or {}).get("firstName") or profile.get("first_name") or ""}
+
+
+@router.post("/track-activity")
+async def track_activity_endpoint(req: TrackActivityRequest):
+    customer_id = None
+    if req.customer_token:
+        customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+
+    return activity_tracker.track_activity(
+        shop=req.shop,
+        visitor_id=req.visitor_id,
+        session_id=req.session_id or "",
+        event_type=req.event_type or "product_click",
+        product_id=req.product_id or "",
+        product_name=req.product_name or "",
+        category=req.category or "",
+        sub_category=req.sub_category or "",
+        style=req.style or "",
+        price=req.price,
+        customer_id=customer_id,
+    )
+
+
+@router.get("/user-activity")
+async def user_activity_endpoint(shop: str, visitor_id: str, customer_token: str | None = None):
+    customer_id = None
+    if customer_token:
+        customer_id = customer_profiles.read_session_token(customer_token, shop)
+    return activity_tracker.get_user_activity_summary(shop, visitor_id, customer_id)
 
 
 @router.get("/widget-config")
@@ -1667,15 +1712,58 @@ WIDGET_JS = r"""
       btn.textContent = "Add to cart";
       btn.addEventListener("click", function (e) {
         e.stopPropagation();
+        try {
+          var payload = {
+            shop: SHOP,
+            visitor_id: VISITOR_ID,
+            session_id: SESSION_ID,
+            event_type: "cart_add",
+            product_id: p.product_id || p.id || "",
+            product_name: p.name || "",
+            category: p.category || "",
+            sub_category: p.sub_category || "",
+            price: p.price || null,
+            customer_token: customerToken
+          };
+          fetch(ORIGIN + "/track-activity", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          }).catch(function () {});
+        } catch (err) {}
         cartAdd(p.id, 1, btn);
       });
       card.appendChild(img); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
-      if (p.url) {
-        // Open the product page in a new tab (rather than navigating
-        // the current tab away) so the shopper doesn't lose their place
-        // in the chat/storefront while browsing.
-        card.addEventListener("click", function () { window.open(p.url, "_blank", "noopener"); });
-      }
+      card.addEventListener("click", function () {
+        try {
+          var payload = {
+            shop: SHOP,
+            visitor_id: VISITOR_ID,
+            session_id: SESSION_ID,
+            event_type: "product_click",
+            product_id: p.product_id || p.id || "",
+            product_name: p.name || "",
+            category: p.category || "",
+            sub_category: p.sub_category || "",
+            style: p.style || "",
+            price: p.price || null,
+            customer_token: customerToken
+          };
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon(ORIGIN + "/track-activity", new Blob([JSON.stringify(payload)], { type: "application/json" }));
+          } else {
+            fetch(ORIGIN + "/track-activity", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              keepalive: true
+            }).catch(function () {});
+          }
+        } catch (err) {}
+        if (p.url) {
+          window.open(p.url, "_blank", "noopener");
+        }
+      });
       row.appendChild(card);
     });
     conversation.appendChild(row);
@@ -2269,5 +2357,32 @@ WIDGET_JS = r"""
       micStatus.textContent = "Voice input is not supported in this browser.";
     });
   }
+
+  // Auto-track product page views if shopper is browsing a product
+  try {
+    if (window.location && window.location.pathname && window.location.pathname.indexOf("/products/") !== -1) {
+      var parts = window.location.pathname.split("/products/");
+      if (parts.length > 1) {
+        var pHandle = parts[1].split("/")[0].split("?")[0].replace(/\/+$/, "");
+        if (pHandle) {
+          var titleEl = document.querySelector("h1") || document.querySelector(".product-title") || document.querySelector(".product__title");
+          var pTitle = titleEl ? titleEl.textContent.trim() : pHandle;
+          fetch(ORIGIN + "/track-activity", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              shop: SHOP,
+              visitor_id: VISITOR_ID,
+              session_id: SESSION_ID,
+              event_type: "product_view",
+              product_id: pHandle,
+              product_name: pTitle,
+              customer_token: customerToken
+            })
+          }).catch(function () {});
+        }
+      }
+    }
+  } catch (e) {}
 })();
 """
