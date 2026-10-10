@@ -1505,18 +1505,11 @@ def _render_analytics(b: dict, grain: str):
                   compact=True)
         _kpi_card("groups", "Total visitors", _fmt(k["visitors"]) if k["visitors"] is not None else None,
                   "Chat widget visitors", "Not tracked yet")
-        _kpi_card("person", "Unique users", _fmt(k["unique_users"]) if k["unique_users"] is not None else None,
-                  "Distinct chat users", "Not tracked yet")
         _kpi_card("forum", "Chat sessions", _fmt(k["sessions"]) if k["sessions"] is not None else None,
                   "Conversations started", "Not tracked yet")
-        _kpi_card("chat_bubble_outline", "Messages", _fmt(k["messages"]) if k["messages"] is not None else None,
-                  "Sent in chat", "Not tracked yet")
         _kpi_card("swap_horiz", "Msgs / session",
                   _fmt(k["msgs_per_session"], 1) if k["msgs_per_session"] is not None else None,
                   "Average depth of a chat", "Needs sessions + messages")
-        _kpi_card("add_shopping_cart", "Assistant cart adds",
-                  _fmt(k["cart_adds"]) if k["cart_adds"] is not None else None,
-                  period, "Not tracked yet")
 
     # ---- Tips ----
     tips = generate_merchant_tips(b, b.get("features", {}))
@@ -1587,21 +1580,6 @@ def _render_analytics(b: dict, grain: str):
                                              "itemStyle": {"color": "#D1D5DB", "borderRadius": [4, 4, 0, 0]}})
                 ui.echart(option).classes("w-full").style("height:240px;")
                 _unfiltered_note(sales)
-
-    # ---- Assistant cart adds trend ----
-    cart = _metric(b, "agent_cart_adds")
-    with _section_card("Assistant-driven cart adds", "add_shopping_cart",
-                       f"{grain.title()} · {ANALYTICS_RANGES.get(b['days'], '')}"):
-        if not cart["ok"]:
-            _unavailable_state(cart["reason"])
-        else:
-            series = _to_series(cart["data"], b["days"])
-            if "count" not in cart["data"]["fields"] or not any(r["count"] for r in series):
-                _empty_state("No assistant cart adds in this period",
-                             "Items shoppers add to cart through the assistant will show up here.")
-            else:
-                _trend_chart(_aggregate(series, ["count"], grain), [("count", "Cart adds", "#4B5563")])
-                _unfiltered_note(cart)
 
     # ---- Products ----
     _ranked_card(b, "product_views", "Most-viewed products", "visibility",
@@ -1998,4 +1976,95 @@ def appearance_page():
             def handle_upload(e):
                 content = e.content.read()
                 new_url = repo.upload_icon_file(store["$id"], e.name, content)
-       
+                old_url = cfg.get("custom_icon_url", "")
+                repo.update_customization(store["$id"], custom_icon_url=new_url, icon_type="custom")
+                if old_url:
+                    repo.delete_icon_file(old_url)
+                ui.notify("Icon uploaded — refresh to see it applied.", type="positive")
+
+            ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/*").classes("w-full")
+
+
+# --------------------------------------------------------------------
+# KNOWLEDGE / FAQs
+# --------------------------------------------------------------------
+@ui.page("/dashboard/knowledge")
+def knowledge_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+
+    content = _layout("knowledge", store, cfg)
+    with content:
+        _page_header("Knowledge (FAQs)", "Answers your agent can pull from directly.")
+
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
+            question = ui.input("Question", placeholder="How long does shipping take?").classes("w-full")
+            answer = ui.input("Answer", placeholder="3-5 business days.").classes("w-full")
+            error_label = ui.label("").classes("text-xs text-gray-500")
+
+            def add_faq():
+                if not question.value.strip() or not answer.value.strip():
+                    error_label.text = "Both a question and an answer are required."
+                    return
+                repo.add_faq(store["$id"], question.value.strip(), answer.value.strip())
+                question.value = ""
+                answer.value = ""
+                error_label.text = ""
+                render_faqs()
+
+            ui.button("Add FAQ", on_click=add_faq).props("no-caps").classes("mt-1").style(
+                f"background:{BRAND};color:white;border-radius:10px;"
+            )
+
+        faq_list = ui.column().classes("w-full gap-2")
+
+        def render_faqs():
+            faq_list.clear()
+            faqs = repo.list_faqs(store["$id"])
+            with faq_list:
+                if not faqs:
+                    ui.label("No FAQs yet — add your first one above.").classes("text-xs text-gray-400")
+                for f in faqs:
+                    with ui.row().classes(CARD_CLASSES + " p-4 items-start justify-between"):
+                        with ui.column().classes("gap-0.5"):
+                            ui.label(f["question"]).classes("text-sm font-semibold text-gray-800")
+                            ui.label(f["answer"]).classes("text-xs text-gray-500")
+
+                        def delete_faq(faq_id=f["$id"]):
+                            repo.delete_faq(store["$id"], faq_id)
+                            render_faqs()
+
+                        ui.button(icon="delete", on_click=delete_faq).props("flat round dense").style("color:#D1D5DB;")
+
+        render_faqs()
+
+
+# --------------------------------------------------------------------
+# FEEDBACK
+# --------------------------------------------------------------------
+@ui.page("/dashboard/feedback")
+def feedback_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+
+    content = _layout("feedback", store, cfg)
+    with content:
+        _page_header("Feedback & Help", "Tell us what's working, what's not, or request a feature.")
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
+            message = ui.textarea("Your message", placeholder="I'd love to be able to...").classes("w-full").props("rows=4")
+            sent_label = ui.label("").classes("text-xs text-gray-500 font-medium")
+
+            def send():
+                if not message.value.strip():
+                    return
+                repo.submit_feedback(store["$id"], message.value.strip())
+                message.value = ""
+                sent_label.text = "Thanks — we got it ✓"
+
+            ui.button("Send feedback", on_click=send).props("no-caps").classes("mt-1").style(
+                f"background:{BRAND};color:white;border-radius:10px;"
+            )
