@@ -40,6 +40,14 @@ SHOPIFY_SCOPES = (
     or os.environ.get("SCOPES")
     or "read_products,read_orders,write_orders,read_customers"
 ).strip()
+
+# >>> ADDED (analytics): always ask Shopify for the permissions the
+# dashboard's Analytics page needs (orders + products), even if the
+# SHOPIFY_SCOPES / SCOPES environment variable on Render lists fewer.
+for _needed_scope in ("read_products", "read_orders"):
+    if _needed_scope not in [_s.strip() for _s in SHOPIFY_SCOPES.split(",")]:
+        SHOPIFY_SCOPES = f"{SHOPIFY_SCOPES},{_needed_scope}" if SHOPIFY_SCOPES else _needed_scope
+# <<< END ADDED
 APP_URL = (os.environ.get("APP_URL") or os.environ.get("HOST") or "http://localhost:8000").strip().rstrip("/")
 
 STATE_MAX_AGE_SECONDS = 600
