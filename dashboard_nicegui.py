@@ -14,15 +14,20 @@ See the bottom of main.py for how this mounts onto your FastAPI app.
 Run: pip install nicegui
 """
 
+import inspect
+import logging
 import os
 import time
+from datetime import date, datetime, timedelta, timezone
 
 import bcrypt
 import httpx
-from nicegui import ui, app
+from nicegui import ui, app, run
 
 import repository_appwrite as repo
 import email_utils
+
+logger = logging.getLogger("renderlink.dashboard")
 
 APP_URL = (os.environ.get("APP_URL") or os.environ.get("HOST") or "http://localhost:8080").strip().rstrip("/")
 
@@ -39,6 +44,7 @@ SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY", "")
 
 NAV_ITEMS = [
     ("Dashboard", "Dashboard", "home"),
+    ("analytics", "Analytics", "bar_chart"),
     ("store", "Store Information", "storefront"),
     ("agent", "AI Agent", "smart_toy"),
     ("features", "Features", "grid_view"),
@@ -841,13 +847,6 @@ def dashboard_page():
             ).props("dense outlined options-dense").classes("w-full").style("max-width:280px;")
             _render_insight("cart_adds")
 
-        # ---- Analytics (KPIs, charts, tips) — built into this page so it
-        # needs no separate route. Wrapped so it can never break the page. ----
-        try:
-            _analytics_section(store)
-        except Exception:
-            logger.exception("Analytics section failed to render")
-
         # ---- Quick Actions ----
         with ui.card().classes(CARD_CLASSES + " p-5 gap-1"):
             with ui.row().classes("items-center gap-2 mb-1"):
@@ -858,6 +857,7 @@ def dashboard_page():
                 ("menu_book", "Manage FAQs", "Add or edit knowledge base", "knowledge"),
                 ("storefront", "Store Information", "Update your store details", "store"),
                 ("smart_toy", "AI Agent Settings", "Name, instructions & status", "agent"),
+                ("bar_chart", "Analytics", "Chat usage, products & sales", "analytics"),
             ]
             for icon, title, sub, page in quick:
                 with ui.row().classes("w-full items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer hover:bg-gray-50").on(
@@ -873,413 +873,6 @@ def dashboard_page():
                     ui.icon("arrow_forward", size="13px").style("color:#D1D5DB;")
 
         ui.label("© 2024 RenderLink AI Assistant. All rights reserved.").classes("text-center text-xs text-gray-400 mt-2 w-full")
-
-
-# --------------------------------------------------------------------
-# STORE INFORMATION
-# --------------------------------------------------------------------
-@ui.page("/dashboard/store")
-def store_info_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-    info = repo.ensure_store_info(store["$id"])
-
-    content = _layout("store", store, cfg)
-    with content:
-        _page_header("Store Information", "Basic details about your store.")
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            business = ui.input("Business name", value=info.get("business_name", "")).classes("w-full")
-            support = ui.input("Support email", value=info.get("support_email", "")).classes("w-full")
-            timezone = ui.input("Timezone", value=info.get("timezone", "UTC")).classes("w-full")
-            saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
-
-            def save():
-                repo.update_store_info(
-                    store["$id"],
-                    business_name=business.value.strip(),
-                    support_email=support.value.strip(),
-                    timezone=timezone.value.strip() or "UTC",
-                )
-                saved_label.text = "Saved ✓"
-
-            ui.button("Save changes", on_click=save).props("no-caps").classes("mt-2").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
-
-
-# --------------------------------------------------------------------
-# AI AGENT
-# --------------------------------------------------------------------
-@ui.page("/dashboard/agent")
-def agent_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-
-    content = _layout("agent", store, cfg)
-    with content:
-        _page_header("AI Agent", "How your assistant introduces itself, behaves, and whether it's live.")
-
-        agent_color = cfg.get("theme_color") or BRAND
-        s = STATUS_STYLES.get(cfg.get("status", "active"), STATUS_STYLES["active"])
-
-        # ---- Display card (moved here from Dashboard) — read-only, with
-        #      the embedded Live Preview. Clicking Edit/Customize opens
-        #      the popup below where the actual changes are made. ----
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("smart_toy", size="18px").style(f"color:{agent_color};")
-                ui.label("AI Agent").classes("font-bold text-gray-900")
-
-            with ui.row().classes("w-full gap-6 items-start"):
-                with ui.element("div").classes("w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0").style(
-                    f"background:{BRAND_SOFT};"
-                ):
-                    ui.icon("smart_toy", size="34px").style(f"color:{agent_color};")
-
-                with ui.row().classes("flex-1 gap-8"):
-                    with ui.column().classes("gap-0.5"):
-                        ui.label("Agent Name").classes("text-xs text-gray-500")
-                        with ui.row().classes("items-center gap-2"):
-                            name_label = ui.label(cfg.get("agent_name", "")).classes("font-bold text-gray-900")
-                            edit_btn = ui.button("Edit").props("no-caps flat dense").classes(
-                                "text-[11px] font-semibold px-2 py-0.5"
-                            ).style(f"background:{BRAND_SOFT};color:{agent_color};border-radius:999px;min-height:0;")
-                        ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
-                        welcome_label = ui.label(cfg.get("agent_title", "")).classes(
-                            "text-sm text-gray-700 rounded-lg px-3 py-2"
-                        ).style("background:#F9FAFB;")
-                        ui.label("Status").classes("text-xs text-gray-500 mt-2")
-                        status_badge = ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
-                        manage_btn = ui.button("Customize Agent", icon="edit").props("no-caps flat").classes(
-                            "mt-1 text-xs font-semibold"
-                        ).style(f"background:{BRAND_SOFT};color:{agent_color};border-radius:8px;")
-
-                    with ui.column().classes("gap-0.5"):
-                        with ui.row().classes("items-center gap-1.5"):
-                            ui.icon("desktop_windows", size="13px").style("color:#6B7280;")
-                            ui.label("Widget Live Preview").classes("text-xs text-gray-500")
-                        with ui.column().classes("relative p-3 gap-0").style(
-                            f"background:{BRAND_SOFT};border-radius:12px;height:128px;width:220px;"
-                        ):
-                            with ui.column().classes("p-2.5 gap-0").style(
-                                "background:white;border-radius:12px;border-top-left-radius:0;box-shadow:0 1px 2px rgba(0,0,0,0.06);max-width:85%;"
-                            ):
-                                preview_msg_label = ui.label(cfg.get("agent_title", "")).classes("text-xs text-gray-800")
-                                ui.label("10:30 AM").classes("text-[10px] text-gray-400")
-                            with ui.element("div").classes("flex items-center justify-center").style(
-                                f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
-                                f"background:{agent_color};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
-                            ):
-                                ui.icon("forum", size="15px").style("color:white;")
-                        ui.button(
-                            "Open full preview", icon="arrow_forward", on_click=lambda: _open_preview(store)
-                        ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
-
-        # ---- Customize popup — this is where changes actually happen ----
-        def open_customize_dialog():
-            with ui.dialog() as dialog, ui.card().classes("p-6 gap-2 w-full max-w-md"):
-                ui.label("Customize Agent").classes("text-lg font-bold text-gray-900")
-                ui.label("Update how your assistant appears and behaves.").classes("text-xs text-gray-500 mb-2")
-
-                name_input = ui.input("Agent name", value=cfg.get("agent_name", "")).classes("w-full")
-                welcome_input = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
-                instructions_input = ui.textarea("Agent instructions", value=cfg.get("instructions", "")).classes(
-                    "w-full"
-                ).props("rows=5")
-
-                ui.label("Status").classes("text-xs font-semibold text-gray-600 mt-1")
-                status_value = {"v": cfg.get("status", "active")}
-                with ui.row().classes("gap-2") as status_row:
-                    pass
-
-                def render_status_buttons():
-                    status_row.clear()
-                    with status_row:
-                        for key, st in STATUS_STYLES.items():
-                            selected = status_value["v"] == key
-                            with ui.button(
-                                on_click=lambda k=key: (status_value.update(v=k), render_status_buttons())
-                            ).props("no-caps flat") as b:
-                                with ui.row().classes("items-center gap-1.5 no-wrap"):
-                                    ui.element("div").classes("w-2 h-2 rounded-full").style(
-                                        f"background:{st['dot']};flex-shrink:0;"
-                                    )
-                                    ui.label(st["label"])
-                            if selected:
-                                b.style(f"background:{st['bg']};color:{st['text']};border-radius:999px;border:1px solid {st['dot']};")
-                            else:
-                                b.style("background:white;color:#6B7280;border-radius:999px;border:1px solid #E5E7EB;")
-
-                render_status_buttons()
-                ui.label('"Inactive" stops the widget from responding to shoppers.').classes(
-                    "text-[11px] text-gray-400"
-                )
-
-                error_label = ui.label("").classes("text-xs text-gray-500 mt-1")
-
-                def save():
-                    new_name = (name_input.value or "").strip() or "AI Assistant"
-                    new_welcome = (welcome_input.value or "").strip() or "How can I help you today?"
-                    new_instructions = (instructions_input.value or "").strip()
-                    new_status = status_value["v"]
-
-                    repo.update_customization(
-                        store["$id"],
-                        agent_name=new_name,
-                        agent_title=new_welcome,
-                        instructions=new_instructions,
-                        status=new_status,
-                    )
-
-                    # reflect the change immediately, no page reload needed
-                    cfg["agent_name"] = new_name
-                    cfg["agent_title"] = new_welcome
-                    cfg["instructions"] = new_instructions
-                    cfg["status"] = new_status
-
-                    name_label.text = new_name
-                    welcome_label.text = new_welcome
-                    preview_msg_label.text = new_welcome
-                    new_s = STATUS_STYLES.get(new_status, STATUS_STYLES["active"])
-                    status_badge.text = new_s["label"]
-                    status_badge.style(f"background:{new_s['bg']};color:{new_s['text']};")
-
-                    dialog.close()
-                    ui.notify("Agent updated ✓", type="positive")
-
-                with ui.row().classes("gap-2 mt-3 w-full justify-end"):
-                    ui.button("Cancel", on_click=dialog.close).props("no-caps flat").style(
-                        "color:#6B7280;"
-                    )
-                    ui.button("Save changes", on_click=save).props("no-caps").style(
-                        f"background:{BRAND};color:white;border-radius:10px;"
-                    )
-            dialog.open()
-
-        edit_btn.on_click(open_customize_dialog)
-        manage_btn.on_click(open_customize_dialog)
-
-
-# --------------------------------------------------------------------
-# FEATURES — full grid page (reached via sidebar nav)
-# --------------------------------------------------------------------
-@ui.page("/dashboard/features")
-def features_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-    features = repo.ensure_features(store["$id"])
-
-    content = _layout("features", store, cfg)
-    with content:
-        _page_header("Features", "Choose what your AI assistant can do for your customers.")
-        with ui.card().classes(CARD_CLASSES + " p-6"):
-            with ui.grid(columns=2).classes("w-full gap-3"):
-                for key, label, icon in FEATURE_LIST:
-                    with ui.row().classes("items-center justify-between px-4 py-3 rounded-xl").style(f"background:{BRAND_SOFT};"):
-                        with ui.row().classes("items-center gap-2"):
-                            ui.icon(icon, size="15px").style("color:#4B5563;")
-                            ui.label(label).classes("text-sm font-medium text-gray-700")
-
-                        on_toggle = _make_feature_toggle_handler(store["$id"], key, label, features)
-                        ui.switch(value=bool(features.get(key)), on_change=on_toggle).props("color=grey-8")
-
-
-# --------------------------------------------------------------------
-# APPEARANCE
-# --------------------------------------------------------------------
-@ui.page("/dashboard/appearance")
-def appearance_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-
-    content = _layout("appearance", store, cfg)
-    with content:
-        _page_header("Appearance", "Customize how the chat widget looks on your storefront.")
-
-        color_value = {"v": cfg.get("theme_color", "#2b2b2b")}
-
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-3"):
-            ui.label("Theme color").classes("text-xs font-semibold text-gray-600")
-            with ui.row().classes("gap-2") as swatch_row:
-                pass
-
-            def render_swatches():
-                swatch_row.clear()
-                with swatch_row:
-                    for c in THEME_SWATCHES:
-                        selected = color_value["v"] == c
-                        dot = ui.element("div").classes("w-8 h-8 rounded-full cursor-pointer").style(
-                            f"background:{c};border:3px solid {'#111827' if selected else 'transparent'};"
-                        )
-                        dot.on("click", lambda c=c: (color_value.update(v=c), render_swatches()))
-
-            render_swatches()
-
-            welcome = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
-
-            saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
-
-            def save():
-                repo.update_customization(
-                    store["$id"],
-                    theme_color=color_value["v"],
-                    agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
-                )
-                saved_label.text = "Saved ✓"
-
-            with ui.row().classes("items-center gap-2 mt-2"):
-                ui.button("Save changes", on_click=save).props("no-caps").style(
-                    f"background:{BRAND};color:white;border-radius:10px;"
-                )
-                ui.button("Preview", icon="visibility", on_click=lambda: _open_preview(store)).props("no-caps flat").style(
-                    f"border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;"
-                )
-
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            ui.label("Custom icon image").classes("text-xs font-semibold text-gray-600")
-            icon_preview_row = ui.row().classes("items-center gap-3")
-            with icon_preview_row:
-                if cfg.get("custom_icon_url"):
-                    ui.image(cfg["custom_icon_url"]).classes("w-10 h-10 rounded-full")
-
-                    def delete_icon():
-                        repo.delete_icon_file(cfg.get("custom_icon_url", ""))
-                        repo.update_customization(store["$id"], custom_icon_url="", icon_type="preset")
-                        icon_preview_row.clear()
-                        ui.notify("Icon removed — refresh to see it applied.", type="positive")
-
-                    ui.button("Remove icon", icon="delete", on_click=delete_icon).props(
-                        "no-caps flat dense"
-                    ).style("color:#DC2626;")
-
-            def handle_upload(e):
-                content = e.content.read()
-                new_url = repo.upload_icon_file(store["$id"], e.name, content)
-                old_url = cfg.get("custom_icon_url", "")
-                repo.update_customization(store["$id"], custom_icon_url=new_url, icon_type="custom")
-                if old_url:
-                    repo.delete_icon_file(old_url)
-                ui.notify("Icon uploaded — refresh to see it applied.", type="positive")
-
-            ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/*").classes("w-full")
-
-
-# --------------------------------------------------------------------
-# KNOWLEDGE / FAQs
-# --------------------------------------------------------------------
-@ui.page("/dashboard/knowledge")
-def knowledge_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-
-    content = _layout("knowledge", store, cfg)
-    with content:
-        _page_header("Knowledge (FAQs)", "Answers your agent can pull from directly.")
-
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            question = ui.input("Question", placeholder="How long does shipping take?").classes("w-full")
-            answer = ui.input("Answer", placeholder="3-5 business days.").classes("w-full")
-            error_label = ui.label("").classes("text-xs text-gray-500")
-
-            def add_faq():
-                if not question.value.strip() or not answer.value.strip():
-                    error_label.text = "Both a question and an answer are required."
-                    return
-                repo.add_faq(store["$id"], question.value.strip(), answer.value.strip())
-                question.value = ""
-                answer.value = ""
-                error_label.text = ""
-                render_faqs()
-
-            ui.button("Add FAQ", on_click=add_faq).props("no-caps").classes("mt-1").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
-
-        faq_list = ui.column().classes("w-full gap-2")
-
-        def render_faqs():
-            faq_list.clear()
-            faqs = repo.list_faqs(store["$id"])
-            with faq_list:
-                if not faqs:
-                    ui.label("No FAQs yet — add your first one above.").classes("text-xs text-gray-400")
-                for f in faqs:
-                    with ui.row().classes(CARD_CLASSES + " p-4 items-start justify-between"):
-                        with ui.column().classes("gap-0.5"):
-                            ui.label(f["question"]).classes("text-sm font-semibold text-gray-800")
-                            ui.label(f["answer"]).classes("text-xs text-gray-500")
-
-                        def delete_faq(faq_id=f["$id"]):
-                            repo.delete_faq(store["$id"], faq_id)
-                            render_faqs()
-
-                        ui.button(icon="delete", on_click=delete_faq).props("flat round dense").style("color:#D1D5DB;")
-
-        render_faqs()
-
-
-# --------------------------------------------------------------------
-# FEEDBACK
-# --------------------------------------------------------------------
-@ui.page("/dashboard/feedback")
-def feedback_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-
-    content = _layout("feedback", store, cfg)
-    with content:
-        _page_header("Feedback & Help", "Tell us what's working, what's not, or request a feature.")
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            message = ui.textarea("Your message", placeholder="I'd love to be able to...").classes("w-full").props("rows=4")
-            sent_label = ui.label("").classes("text-xs text-gray-500 font-medium")
-
-            def send():
-                if not message.value.strip():
-                    return
-                repo.submit_feedback(store["$id"], message.value.strip())
-                message.value = ""
-                sent_label.text = "Thanks — we got it ✓"
-
-            ui.button("Send feedback", on_click=send).props("no-caps").classes("mt-1").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
-
-
-# ====================================================================
-# NEW: ANALYTICS + VERIFIED FEATURE TOGGLES
-# Everything below was appended at the END of the file on purpose, so
-# it can never affect the routes/pages defined above it.
-# ====================================================================
-import asyncio  # noqa: E402
-import inspect  # noqa: E402
-import logging  # noqa: E402
-from datetime import date, datetime, timedelta, timezone  # noqa: E402
-
-try:  # older NiceGUI versions may not ship nicegui.run
-    from nicegui import run as _ng_run  # noqa: E402
-except Exception:  # pragma: no cover
-    _ng_run = None
-
-logger = logging.getLogger("renderlink.dashboard")
-
-
-async def _run_blocking(fn, *args):
-    """Runs a blocking (DB/API) function without freezing the UI."""
-    if _ng_run is not None and hasattr(_ng_run, "io_bound"):
-        return await _ng_run.io_bound(fn, *args)
-    return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
 
 
 # --------------------------------------------------------------------
@@ -1330,10 +923,8 @@ def _make_feature_toggle_handler(store_id: str, key: str, label: str, features: 
                 on_changed(new_value)
             ui.notify(f"{label} {'enabled' if new_value else 'disabled'}", type="positive")
         else:
-            sender = getattr(e, "sender", None)
-            if sender is not None:
-                state["reverting"] = True
-                sender.set_value(not new_value)
+            state["reverting"] = True
+            e.sender.set_value(not new_value)
 
     return handler
 
@@ -2005,4 +1596,406 @@ def _render_analytics(b: dict, grain: str):
             _unavailable_state(cart["reason"])
         else:
             series = _to_series(cart["data"], b["days"])
-            if "count" not in cart["data"]["fields"] or no
+            if "count" not in cart["data"]["fields"] or not any(r["count"] for r in series):
+                _empty_state("No assistant cart adds in this period",
+                             "Items shoppers add to cart through the assistant will show up here.")
+            else:
+                _trend_chart(_aggregate(series, ["count"], grain), [("count", "Cart adds", "#4B5563")])
+                _unfiltered_note(cart)
+
+    # ---- Products ----
+    _ranked_card(b, "product_views", "Most-viewed products", "visibility",
+                 "No product views recorded in this period", "Views are counted when shoppers open a product.", "#4B5563")
+    _ranked_card(b, "product_searches", "Top product searches", "search",
+                 "No product searches recorded in this period", "Searches made through the assistant appear here.", "#6B7280")
+    _ranked_card(b, "product_purchases", "Most-purchased products", "shopping_bag",
+                 "No purchases recorded in this period", "Purchased products will be ranked here.", "#374151")
+    _ranked_card(b, "product_cart_adds", "Most added to cart via the assistant", "add_shopping_cart",
+                 "No assistant cart adds in this period", "Products shoppers add to cart in chat are ranked here.", "#1F2937")
+
+    # ---- Category popularity ----
+    cat = _metric(b, "category_popularity")
+    with _section_card("Product popularity by category", "category"):
+        if not cat["ok"]:
+            _unavailable_state(cat["reason"])
+        elif not cat["data"]:
+            _empty_state("No category activity recorded in this period",
+                         "Category interest appears once products are viewed, searched or bought.")
+        else:
+            ui.echart({
+                "tooltip": {"trigger": "item"},
+                "legend": {"bottom": 0, "textStyle": {"fontSize": 10}},
+                "series": [{"type": "pie", "radius": ["35%", "70%"],
+                            "data": [{"value": c, "name": n} for n, c in cat["data"]],
+                            "label": {"fontSize": 10},
+                            "itemStyle": {"borderRadius": 4, "borderColor": "#fff", "borderWidth": 2}}],
+                "color": _CHART_COLORS,
+            }).classes("w-full").style("height:280px;")
+            _unfiltered_note(cat)
+
+    # ---- Data coverage (transparency) ----
+    missing = [_METRIC_LABELS[m] for m, r in b["metrics"].items() if not r["ok"]]
+    if missing:
+        ui.label("Not available yet (no data source connected or loading failed): " + ", ".join(missing)).classes(
+            "text-[11px] text-gray-400"
+        )
+
+
+@ui.page("/dashboard/analytics")
+async def analytics_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+    client = ui.context.client
+
+    saved_days = app.storage.user.get("analytics_days", 14)
+    state = {"days": saved_days if saved_days in ANALYTICS_RANGES else 14, "grain": "daily", "bundle": None, "req": 0}
+
+    content = _layout("analytics", store, cfg)
+    with content:
+        _page_header("Analytics", "How shoppers use your assistant and what they're interested in.")
+
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.select(
+                ANALYTICS_RANGES, value=state["days"],
+                on_change=lambda e: on_range(e.value),
+            ).props("dense outlined options-dense").style("min-width:170px;")
+            ui.toggle(
+                {"daily": "Daily", "weekly": "Weekly"}, value=state["grain"],
+                on_change=lambda e: on_grain(e.value),
+            ).props("no-caps dense unelevated toggle-color=grey-8")
+            ui.button(icon="refresh", on_click=lambda: refresh()).props("flat round dense").style("color:#6B7280;")
+
+        body = ui.column().classes("w-full gap-4")
+
+    def render():
+        body.clear()
+        with body:
+            if state["bundle"] is not None:
+                _render_analytics(state["bundle"], state["grain"])
+
+    async def refresh():
+        state["req"] += 1
+        my_req = state["req"]
+        body.clear()
+        with body:
+            with ui.row().classes("w-full items-center justify-center py-16 gap-3"):
+                ui.spinner(size="lg").props("color=grey-7")
+                ui.label("Loading analytics…").classes("text-sm text-gray-500")
+        try:
+            bundle = await run.io_bound(load_analytics, store, state["days"])
+        except Exception:
+            logger.exception("Loading analytics failed")
+            body.clear()
+            with body:
+                _empty_state("Couldn't load analytics", "Please try again in a moment.", icon="error_outline")
+            return
+        if my_req != state["req"]:
+            return  # a newer request superseded this one
+        state["bundle"] = bundle
+        render()
+
+    async def on_range(value):
+        state["days"] = int(value)
+        app.storage.user["analytics_days"] = state["days"]
+        await refresh()
+
+    def on_grain(value):
+        state["grain"] = value
+        if state["bundle"] is not None:
+            render()
+
+    await client.connected()  # so the loading spinner is visible while data loads
+    await refresh()
+
+
+# --------------------------------------------------------------------
+# STORE INFORMATION
+# --------------------------------------------------------------------
+@ui.page("/dashboard/store")
+def store_info_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+    info = repo.ensure_store_info(store["$id"])
+
+    content = _layout("store", store, cfg)
+    with content:
+        _page_header("Store Information", "Basic details about your store.")
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
+            business = ui.input("Business name", value=info.get("business_name", "")).classes("w-full")
+            support = ui.input("Support email", value=info.get("support_email", "")).classes("w-full")
+            timezone = ui.input("Timezone", value=info.get("timezone", "UTC")).classes("w-full")
+            saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
+
+            def save():
+                repo.update_store_info(
+                    store["$id"],
+                    business_name=business.value.strip(),
+                    support_email=support.value.strip(),
+                    timezone=timezone.value.strip() or "UTC",
+                )
+                saved_label.text = "Saved ✓"
+
+            ui.button("Save changes", on_click=save).props("no-caps").classes("mt-2").style(
+                f"background:{BRAND};color:white;border-radius:10px;"
+            )
+
+
+# --------------------------------------------------------------------
+# AI AGENT
+# --------------------------------------------------------------------
+@ui.page("/dashboard/agent")
+def agent_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+
+    content = _layout("agent", store, cfg)
+    with content:
+        _page_header("AI Agent", "How your assistant introduces itself, behaves, and whether it's live.")
+
+        agent_color = cfg.get("theme_color") or BRAND
+        s = STATUS_STYLES.get(cfg.get("status", "active"), STATUS_STYLES["active"])
+
+        # ---- Display card (moved here from Dashboard) — read-only, with
+        #      the embedded Live Preview. Clicking Edit/Customize opens
+        #      the popup below where the actual changes are made. ----
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("smart_toy", size="18px").style(f"color:{agent_color};")
+                ui.label("AI Agent").classes("font-bold text-gray-900")
+
+            with ui.row().classes("w-full gap-6 items-start"):
+                with ui.element("div").classes("w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0").style(
+                    f"background:{BRAND_SOFT};"
+                ):
+                    ui.icon("smart_toy", size="34px").style(f"color:{agent_color};")
+
+                with ui.row().classes("flex-1 gap-8"):
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("Agent Name").classes("text-xs text-gray-500")
+                        with ui.row().classes("items-center gap-2"):
+                            name_label = ui.label(cfg.get("agent_name", "")).classes("font-bold text-gray-900")
+                            edit_btn = ui.button("Edit").props("no-caps flat dense").classes(
+                                "text-[11px] font-semibold px-2 py-0.5"
+                            ).style(f"background:{BRAND_SOFT};color:{agent_color};border-radius:999px;min-height:0;")
+                        ui.label("Welcome Message").classes("text-xs text-gray-500 mt-2")
+                        welcome_label = ui.label(cfg.get("agent_title", "")).classes(
+                            "text-sm text-gray-700 rounded-lg px-3 py-2"
+                        ).style("background:#F9FAFB;")
+                        ui.label("Status").classes("text-xs text-gray-500 mt-2")
+                        status_badge = ui.badge(s["label"]).style(f"background:{s['bg']};color:{s['text']};")
+                        manage_btn = ui.button("Customize Agent", icon="edit").props("no-caps flat").classes(
+                            "mt-1 text-xs font-semibold"
+                        ).style(f"background:{BRAND_SOFT};color:{agent_color};border-radius:8px;")
+
+                    with ui.column().classes("gap-0.5"):
+                        with ui.row().classes("items-center gap-1.5"):
+                            ui.icon("desktop_windows", size="13px").style("color:#6B7280;")
+                            ui.label("Widget Live Preview").classes("text-xs text-gray-500")
+                        with ui.column().classes("relative p-3 gap-0").style(
+                            f"background:{BRAND_SOFT};border-radius:12px;height:128px;width:220px;"
+                        ):
+                            with ui.column().classes("p-2.5 gap-0").style(
+                                "background:white;border-radius:12px;border-top-left-radius:0;box-shadow:0 1px 2px rgba(0,0,0,0.06);max-width:85%;"
+                            ):
+                                preview_msg_label = ui.label(cfg.get("agent_title", "")).classes("text-xs text-gray-800")
+                                ui.label("10:30 AM").classes("text-[10px] text-gray-400")
+                            with ui.element("div").classes("flex items-center justify-center").style(
+                                f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
+                                f"background:{agent_color};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
+                            ):
+                                ui.icon("forum", size="15px").style("color:white;")
+                        ui.button(
+                            "Open full preview", icon="arrow_forward", on_click=lambda: _open_preview(store)
+                        ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
+
+        # ---- Customize popup — this is where changes actually happen ----
+        def open_customize_dialog():
+            with ui.dialog() as dialog, ui.card().classes("p-6 gap-2 w-full max-w-md"):
+                ui.label("Customize Agent").classes("text-lg font-bold text-gray-900")
+                ui.label("Update how your assistant appears and behaves.").classes("text-xs text-gray-500 mb-2")
+
+                name_input = ui.input("Agent name", value=cfg.get("agent_name", "")).classes("w-full")
+                welcome_input = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
+                instructions_input = ui.textarea("Agent instructions", value=cfg.get("instructions", "")).classes(
+                    "w-full"
+                ).props("rows=5")
+
+                ui.label("Status").classes("text-xs font-semibold text-gray-600 mt-1")
+                status_value = {"v": cfg.get("status", "active")}
+                with ui.row().classes("gap-2") as status_row:
+                    pass
+
+                def render_status_buttons():
+                    status_row.clear()
+                    with status_row:
+                        for key, st in STATUS_STYLES.items():
+                            selected = status_value["v"] == key
+                            with ui.button(
+                                on_click=lambda k=key: (status_value.update(v=k), render_status_buttons())
+                            ).props("no-caps flat") as b:
+                                with ui.row().classes("items-center gap-1.5 no-wrap"):
+                                    ui.element("div").classes("w-2 h-2 rounded-full").style(
+                                        f"background:{st['dot']};flex-shrink:0;"
+                                    )
+                                    ui.label(st["label"])
+                            if selected:
+                                b.style(f"background:{st['bg']};color:{st['text']};border-radius:999px;border:1px solid {st['dot']};")
+                            else:
+                                b.style("background:white;color:#6B7280;border-radius:999px;border:1px solid #E5E7EB;")
+
+                render_status_buttons()
+                ui.label('"Inactive" stops the widget from responding to shoppers.').classes(
+                    "text-[11px] text-gray-400"
+                )
+
+                error_label = ui.label("").classes("text-xs text-gray-500 mt-1")
+
+                def save():
+                    new_name = (name_input.value or "").strip() or "AI Assistant"
+                    new_welcome = (welcome_input.value or "").strip() or "How can I help you today?"
+                    new_instructions = (instructions_input.value or "").strip()
+                    new_status = status_value["v"]
+
+                    repo.update_customization(
+                        store["$id"],
+                        agent_name=new_name,
+                        agent_title=new_welcome,
+                        instructions=new_instructions,
+                        status=new_status,
+                    )
+
+                    # reflect the change immediately, no page reload needed
+                    cfg["agent_name"] = new_name
+                    cfg["agent_title"] = new_welcome
+                    cfg["instructions"] = new_instructions
+                    cfg["status"] = new_status
+
+                    name_label.text = new_name
+                    welcome_label.text = new_welcome
+                    preview_msg_label.text = new_welcome
+                    new_s = STATUS_STYLES.get(new_status, STATUS_STYLES["active"])
+                    status_badge.text = new_s["label"]
+                    status_badge.style(f"background:{new_s['bg']};color:{new_s['text']};")
+
+                    dialog.close()
+                    ui.notify("Agent updated ✓", type="positive")
+
+                with ui.row().classes("gap-2 mt-3 w-full justify-end"):
+                    ui.button("Cancel", on_click=dialog.close).props("no-caps flat").style(
+                        "color:#6B7280;"
+                    )
+                    ui.button("Save changes", on_click=save).props("no-caps").style(
+                        f"background:{BRAND};color:white;border-radius:10px;"
+                    )
+            dialog.open()
+
+        edit_btn.on_click(open_customize_dialog)
+        manage_btn.on_click(open_customize_dialog)
+
+
+# --------------------------------------------------------------------
+# FEATURES — full grid page (reached via sidebar nav)
+# --------------------------------------------------------------------
+@ui.page("/dashboard/features")
+def features_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+    features = repo.ensure_features(store["$id"])
+
+    content = _layout("features", store, cfg)
+    with content:
+        _page_header("Features", "Choose what your AI assistant can do for your customers.")
+        with ui.card().classes(CARD_CLASSES + " p-6"):
+            with ui.grid(columns=2).classes("w-full gap-3"):
+                for key, label, icon in FEATURE_LIST:
+                    with ui.row().classes("items-center justify-between px-4 py-3 rounded-xl").style(f"background:{BRAND_SOFT};"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon(icon, size="15px").style("color:#4B5563;")
+                            ui.label(label).classes("text-sm font-medium text-gray-700")
+
+                        on_toggle = _make_feature_toggle_handler(store["$id"], key, label, features)
+                        ui.switch(value=bool(features.get(key)), on_change=on_toggle).props("color=grey-8")
+
+
+# --------------------------------------------------------------------
+# APPEARANCE
+# --------------------------------------------------------------------
+@ui.page("/dashboard/appearance")
+def appearance_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+
+    content = _layout("appearance", store, cfg)
+    with content:
+        _page_header("Appearance", "Customize how the chat widget looks on your storefront.")
+
+        color_value = {"v": cfg.get("theme_color", "#2b2b2b")}
+
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-3"):
+            ui.label("Theme color").classes("text-xs font-semibold text-gray-600")
+            with ui.row().classes("gap-2") as swatch_row:
+                pass
+
+            def render_swatches():
+                swatch_row.clear()
+                with swatch_row:
+                    for c in THEME_SWATCHES:
+                        selected = color_value["v"] == c
+                        dot = ui.element("div").classes("w-8 h-8 rounded-full cursor-pointer").style(
+                            f"background:{c};border:3px solid {'#111827' if selected else 'transparent'};"
+                        )
+                        dot.on("click", lambda c=c: (color_value.update(v=c), render_swatches()))
+
+            render_swatches()
+
+            welcome = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
+
+            saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
+
+            def save():
+                repo.update_customization(
+                    store["$id"],
+                    theme_color=color_value["v"],
+                    agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
+                )
+                saved_label.text = "Saved ✓"
+
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.button("Save changes", on_click=save).props("no-caps").style(
+                    f"background:{BRAND};color:white;border-radius:10px;"
+                )
+                ui.button("Preview", icon="visibility", on_click=lambda: _open_preview(store)).props("no-caps flat").style(
+                    f"border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;"
+                )
+
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
+            ui.label("Custom icon image").classes("text-xs font-semibold text-gray-600")
+            icon_preview_row = ui.row().classes("items-center gap-3")
+            with icon_preview_row:
+                if cfg.get("custom_icon_url"):
+                    ui.image(cfg["custom_icon_url"]).classes("w-10 h-10 rounded-full")
+
+                    def delete_icon():
+                        repo.delete_icon_file(cfg.get("custom_icon_url", ""))
+                        repo.update_customization(store["$id"], custom_icon_url="", icon_type="preset")
+                        icon_preview_row.clear()
+                        ui.notify("Icon removed — refresh to see it applied.", type="positive")
+
+                    ui.button("Remove icon", icon="delete", on_click=delete_icon).props(
+                        "no-caps flat dense"
+                    ).style("color:#DC2626;")
+
+            def handle_upload(e):
+                content = e.content.read()
+                new_url = repo.upload_icon_file(store["$id"], e.name, content)
+       
