@@ -724,6 +724,7 @@ def get_chat_summary(store_id: str, days: int = 14) -> dict:
         "messages": total,
         "sessions": len(all_s) if all_s else None,
         "unique_users": len(all_u) if all_u else None,
+        "visitors": len(all_u) if all_u else None,
     }
 
 
