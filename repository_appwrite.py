@@ -748,7 +748,7 @@ def get_top_viewed_products(store_id: str, days: int = 14, limit: int = 8):
 
 
 # ---- Shopify Admin API (real orders) -------------------------------
-_SHOPIFY_API_VERSION = _os.environ.get("SHOPIFY_API_VERSION", "2025-10")
+_SHOPIFY_API_VERSION = _os.environ.get("SHOPIFY_API_VERSION", "2026-07")
 _ORDERS_CACHE: dict = {}
 _ORDERS_CACHE_TTL = 60
 
@@ -777,6 +777,10 @@ def _shopify_paged(store: dict, path: str, params: dict, max_pages: int = 8) -> 
         resp = httpx.get(url, headers=headers, params=params, timeout=15.0)
         if resp.status_code in (401, 403):
             raise AnalyticsUnavailable("Shopify refused the request — re-authorise the app with order access.")
+        if resp.status_code == 404:
+            raise AnalyticsUnavailable(
+                "Shopify returned 404 for this store — check the stored shop domain and that the app is still installed."
+            )
         resp.raise_for_status()
         items.extend(resp.json().get(key, []))
         nxt = resp.links.get("next", {}).get("url")
