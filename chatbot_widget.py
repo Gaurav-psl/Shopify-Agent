@@ -58,6 +58,7 @@ from intent_classifier import classify_intent, load_schema
 from reply_generator import generate_reply
 import shopify_actions
 import customer_profiles
+import semantic
 
 router = APIRouter(tags=["chatbot-widget"])
 
@@ -94,9 +95,51 @@ _FEATURE_FOR_ACTION = {
 }
 _FILTER_ENTITIES = ("price_min", "price_max", "color", "size")
 
+# When the LLM classifier gives up ("fallback"), semantic.route_intent() may
+# propose the closest action by meaning. Only actions that are safe to run
+# from message text alone are accepted: nothing that changes the cart, files
+# a claim, or needs confirmation.
+_RESCUABLE = {
+    ("customer_account", "get_my_orders"),
+    ("customer_account", "get_recommendations"),
+    ("product_search", "search_products"),
+    ("order_tracking", "track_order"),
+    ("cart_management", "view_cart"),
+    ("policy_query", "answer_policy_question"),
+}
+
+
+def _rescue_entities(intent: str, action: str, message: str) -> dict:
+    if action == "search_products":
+        return {"query": extract_search_term(message) or message.strip()}
+    return {}
+
 
 def _pkey(shop: str, session_id: str) -> str:
     return f"{shop}::{session_id}"
+
+
+# Last few turns per session, handed to the intent classifier so follow-ups
+# like "the second one" or "yes, that one" can be understood. In-memory,
+# short-lived, never persisted.
+HISTORY: dict[str, dict] = {}
+HISTORY_TTL_SECONDS = 1800
+HISTORY_MAX_MESSAGES = 6
+
+
+def _remember_turn(key: str, user_text: str, bot_reply: str) -> None:
+    now = time.time()
+    for k in [k for k, v in HISTORY.items() if v["ts"] < now - HISTORY_TTL_SECONDS]:
+        HISTORY.pop(k, None)
+    entry = HISTORY.setdefault(key, {"ts": now, "turns": []})
+    entry["ts"] = now
+    entry["turns"] += [("user", user_text[:300]), ("assistant", (bot_reply or "")[:300])]
+    entry["turns"] = entry["turns"][-HISTORY_MAX_MESSAGES:]
+
+
+def _history_for(key: str) -> list:
+    entry = HISTORY.get(key)
+    return list(entry["turns"]) if entry and entry["ts"] > time.time() - HISTORY_TTL_SECONDS else []
 
 
 def _set_pending(key: str, **fields) -> None:
@@ -280,32 +323,52 @@ def _product_card(p: dict, store) -> dict:
     return card
 
 
-async def _catalog_search(store, term: str, limit: int = 6) -> list[dict] | None:
-    """Forgiving product search over the live catalog. Returns a list of
-    product cards (best matches only), [] when nothing matches, or None
-    when there's nothing to search for / Shopify couldn't be reached."""
-    words = [w for w in _words(extract_search_term(term) or term) if len(w) >= 2]
+async def _catalog_search_ex(store, term: str, limit: int = 6):
+    """Forgiving product search over the live catalog.
+    Returns (cards, used_semantic). cards is a list of product cards (best
+    matches only), [] when nothing matches, or None when there's nothing to
+    search for / Shopify couldn't be reached.
+
+    1) word match on title/type/tags (handles "tee", "candles", "tshirt");
+    2) if that finds nothing, match by MEANING ("something cosy for the cold
+       season" -> hoodies) when an embedding backend is configured."""
+    cleaned = extract_search_term(term) or term
+    words = [w for w in _words(cleaned) if len(w) >= 2]
     if not words:
-        return None
+        return None, False
     try:
         resp = await shopify_actions._get(store, "products.json", {"status": "active", "limit": 250})
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: catalog fetch failed: {e!r}")
-        return None
+        return None, False
     if resp.status_code != 200:
-        return None
+        return None, False
 
+    products = resp.json().get("products", [])
     scored = []
-    for p in resp.json().get("products", []):
+    for p in products:
         hay = _words(p.get("title")) + _words(p.get("product_type")) + _words(p.get("tags"))
         score = sum(1 for w in words if any(h.startswith(v) for h in hay for v in _term_variants(w)))
         if score:
             scored.append((score, p))
-    if not scored:
-        return []
-    best = max(sc for sc, _ in scored)
-    top = [p for sc, p in scored if sc == best]
-    return [_product_card(p, store) for p in top[:limit]]
+    if scored:
+        best = max(sc for sc, _ in scored)
+        top = [p for sc, p in scored if sc == best]
+        return [_product_card(p, store) for p in top[:limit]], False
+
+    try:
+        ranked = await semantic.rank_products(store.shop_domain, products, cleaned, limit)
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: semantic search failed: {e!r}")
+        ranked = None
+    if ranked:
+        return [_product_card(p, store) for p in ranked], True
+    return [], False
+
+
+async def _catalog_search(store, term: str, limit: int = 6) -> list[dict] | None:
+    cards, _ = await _catalog_search_ex(store, term, limit)
+    return cards
 
 
 async def _resolve_product(store, text: str):
@@ -313,14 +376,16 @@ async def _resolve_product(store, text: str):
     to ONE product. Returns (product, options): `product` is set only for
     an unambiguous match; `options` holds the candidates when several
     match, so the caller can ask which one instead of guessing."""
-    found = await _catalog_search(store, text)
+    found, by_meaning = await _catalog_search_ex(store, text)
     if not found:
         return None, None
     wanted = (text or "").strip().lower()
     for p in found:
         if p["name"].lower() == wanted:
             return p, None
-    if len(found) == 1:
+    # A meaning-based match is a guess: never add it to the cart silently,
+    # always let the shopper pick ("did you mean ...?").
+    if len(found) == 1 and not by_meaning:
         return found[0], None
     return None, found
 
@@ -527,6 +592,17 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
 @router.post("/chat")
 @observe(name="chat_request")
 async def chat(req: ChatRequest):
+    result = await _chat_impl(req)
+    try:
+        text = (req.message or "").strip()
+        if text and isinstance(result, dict):
+            _remember_turn(_pkey(req.shop, req.session_id), text, result.get("reply") or "")
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: history update failed: {e!r}")
+    return result
+
+
+async def _chat_impl(req: ChatRequest):
     message = (req.message or "").strip()
     if not message:
         return {"reply": "Could you type or say something first?"}
@@ -577,7 +653,7 @@ async def chat(req: ChatRequest):
         # Anything else: treat as the shopper moving on to a new request.
 
     try:
-        classification = classify_intent(message, SCHEMA)
+        classification = classify_intent(message, SCHEMA, history=_history_for(key))
     except Exception as e:  # noqa: BLE001
         get_client().update_current_span(level="ERROR", status_message=str(e))
         import traceback
@@ -586,6 +662,23 @@ async def chat(req: ChatRequest):
         traceback.print_exc()
         _log(req.shop, message, "error")
         return {"reply": "Sorry, something went wrong understanding that. Could you rephrase?"}
+
+    # Semantic safety net: the LLM gave up, so try to match by meaning.
+    if classification.get("intent") == "fallback" and semantic.enabled():
+        try:
+            routed = await semantic.route_intent(message)
+        except Exception as e:  # noqa: BLE001
+            print(f"chatbot_widget: semantic router failed: {e!r}")
+            routed = None
+        if routed and (routed["intent"], routed["action"]) in _RESCUABLE:
+            print(f"chatbot_widget: semantic router matched {routed['intent']}.{routed['action']} "
+                  f"(score={routed['score']:.2f}, margin={routed['margin']:.2f})")
+            classification = {
+                **classification,
+                "intent": routed["intent"], "action": routed["action"],
+                "entities": _rescue_entities(routed["intent"], routed["action"], message),
+                "confidence": routed["score"], "requires_confirmation": False,
+            }
 
     intent = classification["intent"]
     action = classification["action"]
