@@ -192,7 +192,7 @@ async def get_recommendations(store, entities: dict, session_id: str, customer_i
         if not live.get("error"):
             names=[i.get("name") for o in (live.get("active_orders") or [])+(live.get("past_orders") or []) for i in (o.get("items") or []) if i.get("name")]
             profile={**profile,"purchased_product_ids":live.get("purchased_product_ids") or [],"top_types":list(dict.fromkeys(names))[:20]}
-    result=await recommendation_engine.recommend_products(store,profile,limit=6)
+    result=await recommendation_engine.recommend_products(store,profile,limit=6,price_max=entities.get("price_max"),category=entities.get("category"))
     result["based_on"]={"previous_orders":bool(profile.get("purchased_product_ids")),"recent_searches":(profile.get("recent_searches") or [])[:3]}
     if not customer_id: result["note"]="The shopper is not logged in, so these are general picks. Suggest logging in for picks based on their orders and searches."
     return result
