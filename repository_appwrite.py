@@ -570,3 +570,283 @@ def reset_password(user_id: str, new_password_hash: str) -> None:
         DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id,
         data={"password_hash": new_password_hash, "reset_token": None, "reset_token_expires": None},
     )
+
+
+# ====================================================================
+# ANALYTICS ADDITIONS  (append-only — nothing above this line was edited)
+# --------------------------------------------------------------------
+# Feeds the dashboard's /dashboard/analytics page. Two real data sources:
+#
+#  1) REQUEST_LOGS_COLLECTION (chat logs) — every logged shopper message
+#     is one row, so message counts, per-day usage, cart adds per product
+#     are all real. SESSIONS / UNIQUE USERS are only computed if your
+#     log rows carry an id: a top-level `session_id` / `visitor_id`
+#     attribute, OR the same keys inside the `entities` dict you already
+#     pass to log_request(). Without an id they are reported as
+#     "not available" — never guessed.
+#
+#  2) Shopify Admin API (orders / products) — real sales trend, purchased
+#     products and category popularity. Needs the `read_orders` scope
+#     (and `read_products` for categories) on the store's stored token.
+#
+# Storefront PAGE-VIEW tracking does not exist in this app (the assistant
+# only sees what shoppers ask in chat), so product views are reported as
+# not available until a storefront pixel is added.
+# ====================================================================
+import os as _os
+import time as _time
+from collections import defaultdict as _defaultdict
+
+
+class AnalyticsUnavailable(Exception):
+    """Raised when a metric can't be produced; `user_message` is shown
+    to the merchant in place of the chart."""
+
+    def __init__(self, user_message: str):
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
+_LOG_CACHE: dict = {}
+_LOG_CACHE_TTL = 30  # seconds — several metrics share one log fetch
+
+
+def _parse_created(doc: dict):
+    try:
+        return datetime.fromisoformat((doc.get("$createdAt") or "").replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _log_entities(doc: dict) -> dict:
+    try:
+        ents = json.loads(doc.get("entities") or "{}")
+        return ents if isinstance(ents, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _get_logs_since(store_id: str, days: int, max_logs: int = 10000) -> list[dict]:
+    """All of this store's chat logs from the last `days` days (paged, so
+    longer ranges aren't cut off at the first page)."""
+    key = (store_id, days)
+    hit = _LOG_CACHE.get(key)
+    if hit and _time.time() - hit[0] < _LOG_CACHE_TTL:
+        return hit[1]
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+    logs: list[dict] = []
+    try:
+        cursor = None
+        while len(logs) < max_logs:
+            queries = [
+                Query.equal("store", store_id),
+                Query.greater_than_equal("$createdAt", cutoff_iso),
+                Query.order_desc("$createdAt"),
+                Query.limit(500),
+            ]
+            if cursor:
+                queries.append(Query.cursor_after(cursor))
+            docs = databases.list_documents(DATABASE_ID, REQUEST_LOGS_COLLECTION, queries=queries)["documents"]
+            if not docs:
+                break
+            logs.extend(docs)
+            cursor = docs[-1]["$id"]
+    except AppwriteException:
+        # Fall back to the existing helper + Python-side date filtering.
+        logs = [d for d in get_recent_logs(store_id) if (_parse_created(d) or datetime.min) >= cutoff]
+
+    _LOG_CACHE[key] = (_time.time(), logs)
+    return logs
+
+
+_SESSION_KEYS = ("session_id", "sessionId", "conversation_id", "chat_id")
+_VISITOR_KEYS = ("visitor_id", "visitorId", "user_id", "client_id", "anonymous_id")
+
+
+def _first_id(doc: dict, ents: dict, keys: tuple):
+    for k in keys:
+        v = doc.get(k) or ents.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            return str(v)
+    return None
+
+
+def get_chat_usage_by_day(store_id: str, days: int = 14) -> list[dict]:
+    """[{"date", "messages", ["sessions"], ["unique_users"]}, ...] oldest
+    first. sessions/unique_users appear only if the logs carry ids."""
+    msgs: dict = _defaultdict(int)
+    sess: dict = _defaultdict(set)
+    users: dict = _defaultdict(set)
+    have_s = have_u = False
+    for doc in _get_logs_since(store_id, days):
+        dt = _parse_created(doc)
+        if not dt:
+            continue
+        day = dt.strftime("%Y-%m-%d")
+        msgs[day] += 1
+        ents = _log_entities(doc)
+        s = _first_id(doc, ents, _SESSION_KEYS)
+        if s:
+            sess[day].add(s)
+            have_s = True
+        u = _first_id(doc, ents, _VISITOR_KEYS)
+        if u:
+            users[day].add(u)
+            have_u = True
+
+    out = []
+    for i in range(days - 1, -1, -1):
+        day = (datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
+        row = {"date": day, "messages": msgs.get(day, 0)}
+        if have_s:
+            row["sessions"] = len(sess.get(day, ()))
+        if have_u:
+            row["unique_users"] = len(users.get(day, ()))
+        out.append(row)
+    return out
+
+
+def get_chat_summary(store_id: str, days: int = 14) -> dict:
+    """Totals for the period. Keys with value None = not trackable yet."""
+    all_s, all_u, total = set(), set(), 0
+    for doc in _get_logs_since(store_id, days):
+        total += 1
+        ents = _log_entities(doc)
+        s = _first_id(doc, ents, _SESSION_KEYS)
+        u = _first_id(doc, ents, _VISITOR_KEYS)
+        if s:
+            all_s.add(s)
+        if u:
+            all_u.add(u)
+    return {
+        "messages": total,
+        "sessions": len(all_s) if all_s else None,
+        "unique_users": len(all_u) if all_u else None,
+    }
+
+
+def get_top_cart_added_products(store_id: str, days: int = 14, limit: int = 8) -> list[tuple[str, int]]:
+    """Products shoppers successfully added to cart through the assistant."""
+    counts: dict[str, int] = {}
+    for doc in _get_logs_since(store_id, days):
+        if not (doc.get("detected_intent") == "cart_management"
+                and doc.get("detected_action") == "add_item" and doc.get("status") == "done"):
+            continue
+        name = _entity_text(_log_entities(doc), ("product_name_or_id", "query"))
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
+def get_top_viewed_products(store_id: str, days: int = 14, limit: int = 8):
+    raise AnalyticsUnavailable(
+        "Storefront product views aren't tracked yet — the assistant only sees what shoppers ask in chat. "
+        "See \"Top product searches\" and \"Most added to cart\" for product interest."
+    )
+
+
+# ---- Shopify Admin API (real orders) -------------------------------
+_SHOPIFY_API_VERSION = _os.environ.get("SHOPIFY_API_VERSION", "2025-10")
+_ORDERS_CACHE: dict = {}
+_ORDERS_CACHE_TTL = 60
+
+
+def _shopify_store(store_id: str, scope: str) -> dict:
+    store = get_store_by_id(store_id)
+    if not store or store.get("uninstalled") or not store.get("access_token"):
+        raise AnalyticsUnavailable("Your Shopify connection isn't active. Reinstall the app to enable sales analytics.")
+    granted = {s.strip() for s in (store.get("scopes") or "").split(",") if s.strip()}
+    if scope not in granted:
+        raise AnalyticsUnavailable(
+            f"Sales analytics needs the Shopify '{scope}' permission. Add it to your app's scopes "
+            "and re-authorise the app, then refresh."
+        )
+    return store
+
+
+def _shopify_paged(store: dict, path: str, params: dict, max_pages: int = 8) -> list[dict]:
+    import httpx  # local import: only needed for sales analytics
+
+    url = f"https://{store['shop_domain']}/admin/api/{_SHOPIFY_API_VERSION}/{path}"
+    headers = {"X-Shopify-Access-Token": store["access_token"]}
+    key = path.split(".")[0]
+    items: list[dict] = []
+    for _ in range(max_pages):
+        resp = httpx.get(url, headers=headers, params=params, timeout=15.0)
+        if resp.status_code in (401, 403):
+            raise AnalyticsUnavailable("Shopify refused the request — re-authorise the app with order access.")
+        resp.raise_for_status()
+        items.extend(resp.json().get(key, []))
+        nxt = resp.links.get("next", {}).get("url")
+        if not nxt:
+            break
+        url, params = nxt, None  # the next-page URL already carries its cursor
+    return items
+
+
+def _fetch_orders(store_id: str, days: int) -> list[dict]:
+    key = (store_id, days)
+    hit = _ORDERS_CACHE.get(key)
+    if hit and _time.time() - hit[0] < _ORDERS_CACHE_TTL:
+        return hit[1]
+    store = _shopify_store(store_id, "read_orders")
+    since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    orders = _shopify_paged(store, "orders.json", {
+        "status": "any", "limit": 250, "created_at_min": since,
+        "fields": "id,created_at,cancelled_at,total_price,currency,line_items",
+    })
+    orders = [o for o in orders if not o.get("cancelled_at")]
+    _ORDERS_CACHE[key] = (_time.time(), orders)
+    return orders
+
+
+def get_sales_by_day(store_id: str, days: int = 14) -> list[dict]:
+    """[{"date", "orders", "revenue", "currency"}, ...] from real Shopify orders."""
+    orders = _fetch_orders(store_id, days)
+    buckets: dict = {}
+    currency = ""
+    for o in orders:
+        day = (o.get("created_at") or "")[:10]
+        if not day:
+            continue
+        b = buckets.setdefault(day, {"orders": 0, "revenue": 0.0})
+        b["orders"] += 1
+        try:
+            b["revenue"] += float(o.get("total_price") or 0)
+        except ValueError:
+            pass
+        currency = currency or (o.get("currency") or "")
+    out = []
+    for i in range(days - 1, -1, -1):
+        day = (datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
+        b = buckets.get(day, {"orders": 0, "revenue": 0.0})
+        out.append({"date": day, "orders": b["orders"], "revenue": round(b["revenue"], 2), "currency": currency})
+    return out
+
+
+def get_top_purchased_products(store_id: str, days: int = 14, limit: int = 8) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for o in _fetch_orders(store_id, days):
+        for li in o.get("line_items", []):
+            title = (li.get("title") or "").strip()
+            if title:
+                counts[title] = counts.get(title, 0) + int(li.get("quantity") or 0)
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
+def get_category_popularity(store_id: str, days: int = 14, limit: int = 8) -> list[tuple[str, int]]:
+    """Units sold per Shopify product type (needs read_orders + read_products)."""
+    orders = _fetch_orders(store_id, days)
+    store = _shopify_store(store_id, "read_products")
+    types = {
+        p["id"]: (p.get("product_type") or "").strip() or "Uncategorized"
+        for p in _shopify_paged(store, "products.json", {"limit": 250, "fields": "id,product_type"})
+    }
+    counts: dict[str, int] = {}
+    for o in orders:
+        for li in o.get("line_items", []):
+            cat = types.get(li.get("product_id"), "Uncategorized")
+            counts[cat] = counts.get(cat, 0) + int(li.get("quantity") or 0)
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
