@@ -103,7 +103,7 @@
         },
         {
           "name": "list_recent_orders",
-          "description": "Show a LIST of the shopper's orders or their order history, not the status of one order.",
+          "description": "Show a LIST of the shopper's orders (all, past, current, active or pending) or their order history, not the status of one specific order.",
           "requires_confirmation": false,
           "required_entities": [],
           "optional_entities": [
@@ -111,6 +111,8 @@
           ],
           "example_utterances": [
             "Show me my recent orders",
+            "Show all my past and current orders",
+            "mere saare orders dikhao",
             "What have I ordered before?",
             "Show my order history",
             "mere orders dikhao"
@@ -320,7 +322,7 @@
         },
         {
           "name": "get_recommendations",
-          "description": "Suggest products PERSONALLY for this shopper, without naming what they want.",
+          "description": "Suggest products PERSONALLY for this shopper (based on their orders and searches), without naming what they want. May carry a budget or category.",
           "requires_confirmation": false,
           "required_entities": [],
           "optional_entities": [
@@ -330,8 +332,9 @@
           "example_utterances": [
             "Recommend something for me",
             "What should I buy?",
-            "Suggest products I might like",
-            "mujhe kuch recommend karo"
+            "mujhe kuch recommend karo",
+            "Suggest something under 1000",
+            "Suggest products I might like"
           ]
         }
       ],
