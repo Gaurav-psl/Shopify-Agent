@@ -128,3 +128,38 @@ class ForceCookieSameSiteNone:
 app.add_middleware(ForceCookieSameSiteNone)
 
 
+# --------------------------------------------------------------------
+# Analytics events table (added)
+# --------------------------------------------------------------------
+# 1) Dashboard charts for chat usage, searches and cart adds now read the
+#    separate `analytics_events` collection. Orders / revenue / purchased
+#    products / categories are NOT listed here, so they keep coming live
+#    from Shopify. For a non-Shopify platform, drop the `metrics=` list to
+#    use the events table for everything.
+import threading
+import time
+import repository_appwrite as _repo
+
+_repo.register_event_providers(
+    dashboard_nicegui.register_analytics_provider,
+    platform="shopify",
+    metrics=["chat_summary", "chat_usage_daily", "product_searches",
+             "agent_cart_adds", "product_cart_adds"],
+)
+
+
+# 2) Delete analytics events older than 60 days, once a day. A plain
+#    background thread is used so it works regardless of how the app is
+#    started. First run is 60 seconds after startup.
+def _events_retention_loop():
+    time.sleep(60)
+    while True:
+        try:
+            removed = _repo.purge_old_events()
+            print(f"analytics retention: removed {removed} events older than {_repo.EVENT_RETENTION_DAYS} days")
+        except Exception as e:  # noqa: BLE001 — never let this thread die
+            print(f"analytics retention failed: {e!r}")
+        time.sleep(24 * 60 * 60)
+
+
+threading.Thread(target=_events_retention_loop, daemon=True, name="events-retention").start()
