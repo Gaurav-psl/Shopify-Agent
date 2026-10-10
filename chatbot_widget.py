@@ -688,17 +688,27 @@ async def _chat_impl(req: ChatRequest):
         if m:
             entities["order_number"] = m.group(1)
     language = classification["language"]
+
+    # The schema names some actions differently from the backend:
+    #  - recommendations are product_search.get_recommendations in the schema, but run as an account feature here;
+    #  - "my orders" is order_tracking.list_recent_orders in the schema. A logged-in shopper gets the full list
+    #    (active + past) with no email needed; a logged-out shopper keeps the email-verified path.
+    if (intent, action) == ("product_search", "get_recommendations"):
+        intent = "customer_account"
+    if (intent, action) == ("customer_account", "get_my_orders") and not customer_id:
+        intent, action = "order_tracking", "list_recent_orders"
     if customer_id and (intent, action) == ("order_tracking", "list_recent_orders"):
         intent, action = "customer_account", "get_my_orders"
     if customer_id and (intent, action) == ("order_tracking", "track_order") and not (entities.get("order_number") or entities.get("order_id")):
         intent, action = "customer_account", "get_my_orders"
-    # "show my orders" / "recommend something for me" always mean the account features, whatever the classifier guessed.
+
+    # "show my orders" / "recommend something for me" always mean these features, whatever the classifier guessed.
     if intent in ("fallback", "order_tracking", "product_search") and not _ORDER_NO_RE.search(message) and _MY_ORDERS_RE.search(message):
-        intent, action = "customer_account", "get_my_orders"
+        intent, action = ("customer_account", "get_my_orders") if customer_id else ("order_tracking", "list_recent_orders")
     elif intent in ("fallback", "product_search") and _RECOMMEND_RE.search(message) and not any(
             entities.get(k) not in (None, "", []) for k in ("query", "category", "color", "price_min", "price_max")):
         intent, action = "customer_account", "get_recommendations"
-    if customer_id and intent == "product_search":
+    if customer_id and (intent, action) == ("product_search", "search_products"):
         asyncio.create_task(customer_profiles.record_interaction(req.shop, customer_id, dict(entities), customer_profile))
 
     try:
