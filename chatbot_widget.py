@@ -213,6 +213,56 @@ _CURRENT_VISITOR_ID = contextvars.ContextVar("analytics_visitor_id", default=Non
 # <<< END ADDED
 
 
+# >>> ADDED (analytics events table): every chat event is also copied into the
+# separate `analytics_events` collection (see repository_appwrite.record_event)
+# that the dashboard charts read. Runs in a background thread so it never
+# slows a reply, and every failure is swallowed so chat can't break.
+# Stores no message text — only the intent label, searched/added product
+# names, and the anonymous session/visitor ids.
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+_EVENT_POOL = _ThreadPoolExecutor(max_workers=2)
+_EVENT_STORE_IDS: dict[str, str] = {}
+
+
+def _store_id_for_events(shop: str) -> str | None:
+    cached = _EVENT_STORE_IDS.get(shop)
+    if cached:
+        return cached
+    doc = repo._find_store_doc(shop)
+    if doc:
+        _EVENT_STORE_IDS[shop] = doc["$id"]
+        return doc["$id"]
+    return None
+
+
+def _write_events(shop: str, events: list) -> None:
+    try:
+        store_id = _store_id_for_events(shop)
+        if not store_id:
+            return
+        for ev in events:
+            repo.record_event(store_id, **ev)
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: analytics events failed: {e!r}")
+
+
+def _build_events(status: str, intent, action, entities, session_id, visitor_id) -> list:
+    ents = entities if isinstance(entities, dict) else {}
+    base = {"platform": "shopify", "session_id": session_id or "", "visitor_id": visitor_id or ""}
+    events = [{**base, "event_type": "chat_message", "name": str(intent or "")}]
+    if status == "done" and (intent, action) == ("product_search", "search_products"):
+        term = ents.get("query") or ents.get("category")
+        if isinstance(term, str) and term.strip():
+            events.append({**base, "event_type": "search", "name": term.strip(),
+                           "category": ents.get("category") if isinstance(ents.get("category"), str) else ""})
+    if status == "done" and (intent, action) == ("cart_management", "add_item"):
+        product = ents.get("product_name_or_id") or ents.get("query")
+        if isinstance(product, str) and product.strip():
+            events.append({**base, "event_type": "cart_add", "name": product.strip()})
+    return events
+# <<< END ADDED
+
+
 def _log(shop: str, message: str, status: str, intent=None, action=None, entities=None, reply: str = "") -> None:
     """Best-effort request logging for the dashboard's Insights section.
     Must never break the actual chat response, so failures here are
@@ -236,6 +286,17 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
         repo.log_request(shop, message, status, detected_intent=intent, detected_action=action, reply=reply, entities=entities)
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: log_request failed: {e!r}")
+
+    # >>> ADDED (analytics events table)
+    try:
+        _sid2 = _CURRENT_SESSION_ID.get()
+        _sid2 = None if _sid2 == "anonymous" else (str(_sid2)[:80] if _sid2 else None)
+        _vid2 = _CURRENT_VISITOR_ID.get()
+        _vid2 = str(_vid2)[:80] if _vid2 else None
+        _EVENT_POOL.submit(_write_events, shop, _build_events(status, intent, action, entities, _sid2, _vid2))
+    except Exception as e:  # noqa: BLE001
+        print(f"chatbot_widget: analytics events failed: {e!r}")
+    # <<< END ADDED
 
 
 def _safe_reply(action: str, data: dict, language: str, message: str, fallback: str, **kwargs) -> str:
