@@ -57,10 +57,26 @@ def _card(product: dict, store) -> dict:
     return card
 
 
-async def recommend_products(store, customer_profile: dict | None, limit: int = 6) -> dict:
+async def recommend_products(store, customer_profile: dict | None, limit: int = 6, price_max=None, category=None) -> dict:
     catalog = await shopify_actions.get_active_products_graphql(store, first=100)
     if not catalog:
         return {"results": [], "reason": "catalog_unavailable"}
+
+    # Optional budget / category the shopper mentioned ("suggest something under 1000").
+    try:
+        price_cap = float(price_max) if price_max not in (None, "") else None
+    except (TypeError, ValueError):
+        price_cap = None
+    category_words = _words(category) if category else set()
+    if price_cap or category_words:
+        def _fits(p):
+            price = _price(p)
+            if price_cap and price is not None and price > price_cap:
+                return False
+            return not category_words or bool(category_words & _product_words(p))
+        catalog = [p for p in catalog if _fits(p)]
+        if not catalog:
+            return {"results": [], "reason": "no_match_for_filters"}
 
     profile = customer_profile or {}
     purchased = {_num_id(x) for x in (profile.get("purchased_product_ids") or [])}
