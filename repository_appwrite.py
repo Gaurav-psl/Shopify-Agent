@@ -855,3 +855,335 @@ def get_category_popularity(store_id: str, days: int = 14, limit: int = 8) -> li
             cat = types.get(li.get("product_id"), "Uncategorized")
             counts[cat] = counts.get(cat, 0) + int(li.get("quantity") or 0)
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
+# ====================================================================
+# ANALYTICS EVENTS TABLE  (append-only — nothing above this line was edited)
+# --------------------------------------------------------------------
+# One generic, platform-neutral table (`analytics_events`) that stores the
+# raw facts the dashboard charts are built from, for ANY kind of store
+# (Shopify, WooCommerce, custom...). Nothing in it is Shopify-specific:
+#
+#   event_type    what happened. Use these (or your own):
+#                   "search"        shopper searched for something
+#                   "cart_add"      item added to cart
+#                   "purchase"      one row per product line bought (value = quantity)
+#                   "order"         one row per order (value = order total)
+#                   "product_view"  product page viewed
+#                   "chat_message"  one chat message
+#   name          product / search term
+#   category      product category / type (optional)
+#   value         quantity, or money amount for "order" rows
+#   currency      e.g. "USD" (optional)
+#   platform      "shopify", "woocommerce", ... (just a label)
+#   session_id / visitor_id   anonymous random ids (optional)
+#   external_id   the platform's own id (e.g. order id) so a retried
+#                 webhook can never be counted twice (optional)
+#
+# Data is kept for EVENT_RETENTION_DAYS (60) and then removed by
+# purge_old_events(). Every write helper here swallows its own errors and
+# returns False, so analytics can never break a shopper's chat.
+#
+# SETUP (once): run  python -c "import repository_appwrite as r; print(r.setup_analytics_events_collection())"
+# The collection id defaults to "analytics_events"; override with the
+# ANALYTICS_EVENTS_COLLECTION_ID environment variable if you named it differently.
+# ====================================================================
+ANALYTICS_EVENTS_COLLECTION = _os.environ.get("ANALYTICS_EVENTS_COLLECTION_ID", "analytics_events")
+EVENT_RETENTION_DAYS = 60
+
+EVENT_SEARCH = "search"
+EVENT_CART_ADD = "cart_add"
+EVENT_PURCHASE = "purchase"
+EVENT_ORDER = "order"
+EVENT_PRODUCT_VIEW = "product_view"
+EVENT_CHAT = "chat_message"
+
+
+def setup_analytics_events_collection() -> dict:
+    """Creates the collection, its attributes and indexes in Appwrite.
+    Safe to run more than once: anything that already exists is reported
+    as 'skipped'. Returns a {step: result} report."""
+    report: dict = {}
+
+    def step(label, fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+            report[label] = "ok"
+        except AppwriteException as e:
+            report[label] = f"skipped: {getattr(e, 'message', e)}"
+
+    col = ANALYTICS_EVENTS_COLLECTION
+    step("collection", databases.create_collection, DATABASE_ID, col, "analytics_events",
+         permissions=[], document_security=False)
+
+    strings = [
+        ("store", 64, True), ("event_type", 32, True), ("platform", 32, False),
+        ("name", 255, False), ("category", 255, False), ("currency", 8, False),
+        ("session_id", 100, False), ("visitor_id", 100, False), ("external_id", 100, False),
+    ]
+    for key, size, required in strings:
+        step(f"attr:{key}", databases.create_string_attribute, DATABASE_ID, col, key, size, required)
+    step("attr:value", databases.create_float_attribute, DATABASE_ID, col, "value", False, default=1.0)
+
+    # Attributes are created asynchronously; indexes need them "available".
+    for _ in range(30):
+        try:
+            attrs = databases.list_attributes(DATABASE_ID, col)["attributes"]
+            if attrs and all(a.get("status") == "available" for a in attrs):
+                break
+        except AppwriteException:
+            pass
+        _time.sleep(1)
+
+    step("index:store", databases.create_index, DATABASE_ID, col, "idx_store", "key", ["store"])
+    step("index:store_type", databases.create_index, DATABASE_ID, col, "idx_store_type", "key", ["store", "event_type"])
+    step("index:external", databases.create_index, DATABASE_ID, col, "idx_external", "key", ["store", "event_type", "external_id"])
+    return report
+
+
+def _ev_clip(value, size: int) -> str:
+    return str(value or "").strip()[:size]
+
+
+def record_event(store_id: str, event_type: str, name: str = "", value: float = 1, *,
+                 platform: str = "shopify", category: str = "", currency: str = "",
+                 session_id: str = "", visitor_id: str = "", external_id: str = "") -> bool:
+    """Stores one analytics event. Returns True if written, False if it was
+    a duplicate (same external_id) or failed. Never raises."""
+    try:
+        if external_id:
+            dup = databases.list_documents(
+                DATABASE_ID, ANALYTICS_EVENTS_COLLECTION,
+                queries=[Query.equal("store", store_id), Query.equal("event_type", event_type),
+                         Query.equal("external_id", _ev_clip(external_id, 100)), Query.limit(1)],
+            )
+            if dup["documents"]:
+                return False
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            amount = 1.0
+        databases.create_document(
+            DATABASE_ID, ANALYTICS_EVENTS_COLLECTION, ID.unique(),
+            data={
+                "store": store_id,
+                "event_type": _ev_clip(event_type, 32),
+                "platform": _ev_clip(platform, 32),
+                "name": _ev_clip(name, 255),
+                "category": _ev_clip(category, 255),
+                "value": amount,
+                "currency": _ev_clip(currency, 8).upper(),
+                "session_id": _ev_clip(session_id, 100),
+                "visitor_id": _ev_clip(visitor_id, 100),
+                "external_id": _ev_clip(external_id, 100),
+            },
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — analytics must never break the caller
+        print(f"repository_appwrite: record_event failed: {e!r}")
+        return False
+
+
+def purge_old_events(days: int = EVENT_RETENTION_DAYS, max_delete: int = 20000) -> int:
+    """Deletes events older than `days` (default 60). Returns how many were
+    removed. Call it on a schedule (e.g. once a day)."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+    deleted = 0
+    while deleted < max_delete:
+        try:
+            docs = databases.list_documents(
+                DATABASE_ID, ANALYTICS_EVENTS_COLLECTION,
+                queries=[Query.less_than("$createdAt", cutoff_iso), Query.limit(100)],
+            )["documents"]
+        except AppwriteException:
+            break
+        if not docs:
+            break
+        for doc in docs:
+            try:
+                databases.delete_document(DATABASE_ID, ANALYTICS_EVENTS_COLLECTION, doc["$id"])
+                deleted += 1
+            except AppwriteException:
+                pass
+    return deleted
+
+
+# ---- reading (platform-neutral) ------------------------------------
+_EV_CACHE: dict = {}
+_EV_CACHE_TTL = 30  # seconds
+
+
+def _events_since(store_id: str, days: int, event_types: tuple, max_rows: int = 10000) -> list[dict]:
+    key = (store_id, days, event_types)
+    hit = _EV_CACHE.get(key)
+    if hit and _time.time() - hit[0] < _EV_CACHE_TTL:
+        return hit[1]
+    cutoff = datetime.utcnow() - timedelta(days=min(days, EVENT_RETENTION_DAYS))
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+    rows: list[dict] = []
+    cursor = None
+    while len(rows) < max_rows:
+        queries = [
+            Query.equal("store", store_id),
+            Query.equal("event_type", list(event_types)),
+            Query.greater_than_equal("$createdAt", cutoff_iso),
+            Query.order_desc("$createdAt"),
+            Query.limit(500),
+        ]
+        if cursor:
+            queries.append(Query.cursor_after(cursor))
+        docs = databases.list_documents(DATABASE_ID, ANALYTICS_EVENTS_COLLECTION, queries=queries)["documents"]
+        if not docs:
+            break
+        rows.extend(docs)
+        cursor = docs[-1]["$id"]
+    _EV_CACHE[key] = (_time.time(), rows)
+    return rows
+
+
+def _ev_num(v):
+    return int(v) if float(v) == int(v) else round(float(v), 2)
+
+
+def _ev_ranked(store_id: str, days: int, limit: int, event_type: str, field: str = "name", weighted: bool = False):
+    counts: dict = {}
+    for doc in _events_since(store_id, days, (event_type,)):
+        label = (doc.get(field) or "").strip() or ("Uncategorized" if field == "category" else "")
+        if not label:
+            continue
+        try:
+            amount = float(doc.get("value") or 1) if weighted else 1
+        except (TypeError, ValueError):
+            amount = 1
+        counts[label] = counts.get(label, 0) + amount
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [(n, _ev_num(c)) for n, c in ranked]
+
+
+def events_top_searches(store_id: str, days: int = 14, limit: int = 8):
+    return _ev_ranked(store_id, days, limit, EVENT_SEARCH)
+
+
+def events_top_cart_adds(store_id: str, days: int = 14, limit: int = 8):
+    return _ev_ranked(store_id, days, limit, EVENT_CART_ADD)
+
+
+def events_top_purchases(store_id: str, days: int = 14, limit: int = 8):
+    return _ev_ranked(store_id, days, limit, EVENT_PURCHASE, weighted=True)
+
+
+def events_top_viewed(store_id: str, days: int = 14, limit: int = 8):
+    return _ev_ranked(store_id, days, limit, EVENT_PRODUCT_VIEW)
+
+
+def events_category_popularity(store_id: str, days: int = 14, limit: int = 8):
+    return _ev_ranked(store_id, days, limit, EVENT_PURCHASE, field="category", weighted=True)
+
+
+def _ev_day_list(days: int) -> list[str]:
+    return [(datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days - 1, -1, -1)]
+
+
+def events_chat_usage_by_day(store_id: str, days: int = 14) -> list[dict]:
+    msgs: dict = _defaultdict(int)
+    sess: dict = _defaultdict(set)
+    users: dict = _defaultdict(set)
+    have_s = have_u = False
+    for doc in _events_since(store_id, days, (EVENT_CHAT,)):
+        dt = _parse_created(doc)
+        if not dt:
+            continue
+        day = dt.strftime("%Y-%m-%d")
+        msgs[day] += 1
+        if (doc.get("session_id") or "").strip():
+            sess[day].add(doc["session_id"])
+            have_s = True
+        if (doc.get("visitor_id") or "").strip():
+            users[day].add(doc["visitor_id"])
+            have_u = True
+    out = []
+    for day in _ev_day_list(days):
+        row = {"date": day, "messages": msgs.get(day, 0)}
+        if have_s:
+            row["sessions"] = len(sess.get(day, ()))
+        if have_u:
+            row["unique_users"] = len(users.get(day, ()))
+        out.append(row)
+    return out
+
+
+def events_chat_summary(store_id: str, days: int = 14) -> dict:
+    all_s, all_u, total = set(), set(), 0
+    for doc in _events_since(store_id, days, (EVENT_CHAT,)):
+        total += 1
+        if (doc.get("session_id") or "").strip():
+            all_s.add(doc["session_id"])
+        if (doc.get("visitor_id") or "").strip():
+            all_u.add(doc["visitor_id"])
+    return {
+        "messages": total,
+        "sessions": len(all_s) if all_s else None,
+        "unique_users": len(all_u) if all_u else None,
+        "visitors": len(all_u) if all_u else None,
+    }
+
+
+def events_cart_adds_by_day(store_id: str, days: int = 14) -> list[dict]:
+    buckets: dict = _defaultdict(int)
+    for doc in _events_since(store_id, days, (EVENT_CART_ADD,)):
+        dt = _parse_created(doc)
+        if dt:
+            buckets[dt.strftime("%Y-%m-%d")] += 1
+    return [{"date": day, "count": buckets.get(day, 0)} for day in _ev_day_list(days)]
+
+
+def events_sales_by_day(store_id: str, days: int = 14) -> list[dict]:
+    """From "order" events: value = order total."""
+    buckets: dict = {}
+    currency = ""
+    for doc in _events_since(store_id, days, (EVENT_ORDER,)):
+        dt = _parse_created(doc)
+        if not dt:
+            continue
+        b = buckets.setdefault(dt.strftime("%Y-%m-%d"), {"orders": 0, "revenue": 0.0})
+        b["orders"] += 1
+        try:
+            b["revenue"] += float(doc.get("value") or 0)
+        except (TypeError, ValueError):
+            pass
+        currency = currency or (doc.get("currency") or "")
+    out = []
+    for day in _ev_day_list(days):
+        b = buckets.get(day, {"orders": 0, "revenue": 0.0})
+        out.append({"date": day, "orders": b["orders"], "revenue": round(b["revenue"], 2), "currency": currency})
+    return out
+
+
+# Metric names are the ones dashboard_nicegui.py already uses.
+EVENT_PROVIDERS = {
+    "chat_summary": events_chat_summary,
+    "chat_usage_daily": events_chat_usage_by_day,
+    "product_views": events_top_viewed,
+    "product_searches": events_top_searches,
+    "product_purchases": events_top_purchases,
+    "sales_daily": events_sales_by_day,
+    "category_popularity": events_category_popularity,
+    "agent_cart_adds": events_cart_adds_by_day,
+    "product_cart_adds": events_top_cart_adds,
+}
+
+
+def register_event_providers(register_fn, platform: str = "generic", metrics=None) -> None:
+    """Plugs the events table into the dashboard for one platform, using
+    the dashboard's own register_analytics_provider as `register_fn`:
+
+        from dashboard_nicegui import register_analytics_provider
+        repo.register_event_providers(register_analytics_provider, platform="woocommerce")
+
+    Pass `metrics=["product_searches", "product_views"]` to register only
+    some metrics (e.g. keep Shopify's live order data but take searches
+    from this table)."""
+    for metric, fn in EVENT_PROVIDERS.items():
+        if metrics is None or metric in metrics:
+            register_fn(platform, metric, fn)
