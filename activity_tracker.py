@@ -129,8 +129,8 @@ def track_activity(
                     name=product_name or pid_str,
                     value=float(price or 1),
                     session_id=session_id,
-                    visitor_id=visitor_id,
-                    customer_id=str(customer_id) if customer_id else None,
+                    visitor_id=visitor_id or (f"cust_{customer_id}" if customer_id else ""),
+                    external_id=str(customer_id) if customer_id else "",
                     category=sub_category or category,
                     platform="shopify",
                 )
