@@ -21,7 +21,6 @@ import shopify_auth
 import webhooks
 import dashboard_nicegui  # noqa: F401 — importing this registers all @ui.page routes below
 import chatbot_widget  # NOTE: still needs migrating off SQLAlchemy — see below
-import activity_tracker
 
 app = FastAPI(title="Shopify Chatbot Plugin")
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,7 +62,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(shopify_auth.router)
 app.include_router(webhooks.router)
 app.include_router(chatbot_widget.router)  # add back once migrated
-app.include_router(activity_tracker.router)
 
 # --------------------------------------------------------------------
 # NiceGUI mount — must come LAST among routers/mounts above.
@@ -165,3 +163,17 @@ def _events_retention_loop():
 
 
 threading.Thread(target=_events_retention_loop, daemon=True, name="events-retention").start()
+
+
+# 3) Create the `analytics_events` table in Appwrite automatically. Runs once
+#    in the background each time the app starts and is safe to repeat: if the
+#    table already exists every step just reports "skipped". The result is
+#    printed to the Render logs so you can see whether it worked.
+def _create_events_table_once():
+    try:
+        print("analytics table setup:", _repo.setup_analytics_events_collection())
+    except Exception as e:  # noqa: BLE001 — never block or crash the app
+        print(f"analytics table setup failed: {e!r}")
+
+
+threading.Thread(target=_create_events_table_once, daemon=True, name="events-table-setup").start()
