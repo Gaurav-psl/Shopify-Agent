@@ -291,33 +291,6 @@ async def recommend_products(
     if len(unseen_items) >= min(limit, 3):
         scored_items = unseen_items
 
-    # 7. Diversity Re-ranking: Avoid filter bubbles (Max 3 items per subcategory)
-    # Surfacing complementary categories (e.g. Tops + Bottoms/Accessories) increases AOV.
-    max_per_subcat = max(2, limit // 2)
-    diversified: list[tuple[float, dict, str]] = []
-    subcat_counts_sel: Counter = Counter()
-    deferred: list[tuple[float, dict, str]] = []
-
-    for item in scored_items:
-        meta = item[1].get("_metadata", {})
-        subcat = meta.get("sub_category", "Other")
-        if subcat_counts_sel[subcat] < max_per_subcat:
-            diversified.append(item)
-            subcat_counts_sel[subcat] += 1
-            if len(diversified) == limit:
-                break
-        else:
-            deferred.append(item)
-
-    if len(diversified) < limit:
-        for item in deferred:
-            diversified.append(item)
-            if len(diversified) == limit:
-                break
-
-    scored_items = diversified
-
-
     has_personalization = bool(user_activity.get("total_clicks", 0) > 0 or purchased_ids)
 
     return {
