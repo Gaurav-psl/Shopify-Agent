@@ -467,7 +467,14 @@ def login_page():
                 if not user or not bcrypt.checkpw(password.value.encode(), user["password_hash"].encode()):
                     error_label.text = "Invalid email or password."
                     return
-                store_id = user["store_id"]
+                # New accounts are saved by create_dashboard_user() with the
+                # field `store` (a plain id, or a nested document if it is an
+                # Appwrite relationship); older accounts use `store_id`.
+                store_field = user.get("store") or user.get("store_id")
+                store_id = store_field["$id"] if isinstance(store_field, dict) else store_field
+                if not store_id:
+                    error_label.text = "This account isn't linked to a store. Please contact support."
+                    return
                 app.storage.user["store_id"] = store_id
                 app.storage.user["user_id"] = user["$id"]
                 app.storage.user["email"] = user["email"]

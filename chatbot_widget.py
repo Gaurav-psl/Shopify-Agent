@@ -705,6 +705,10 @@ async def _chat_impl(req: ChatRequest):
         return {"reply": "This assistant isn't available right now."}
 
     customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    if req.customer_token and not customer_id:
+        # Token expired (2h TTL) or invalid: don't silently treat a logged-in
+        # shopper as a guest - tell the widget to refresh its session and retry.
+        return {"reply": "", "session_expired": True}
     _remember_customer(req.shop, req.session_id, customer_id)
     customer_profile = await customer_profiles.get_profile(req.shop, customer_id) if customer_id else None
 
@@ -784,16 +788,16 @@ async def _chat_impl(req: ChatRequest):
     #    (active + past) with no email needed; a logged-out shopper keeps the email-verified path.
     if (intent, action) == ("product_search", "get_recommendations"):
         intent = "customer_account"
-    if (intent, action) == ("customer_account", "get_my_orders") and not customer_id:
-        intent, action = "order_tracking", "list_recent_orders"
-    if customer_id and (intent, action) == ("order_tracking", "list_recent_orders"):
+    # Listing orders is login-only: an email alone is not proof of identity, so guests
+    # get the "please log in" reply instead of an email-verified list.
+    if (intent, action) == ("order_tracking", "list_recent_orders"):
         intent, action = "customer_account", "get_my_orders"
     if customer_id and (intent, action) == ("order_tracking", "track_order") and not (entities.get("order_number") or entities.get("order_id")):
         intent, action = "customer_account", "get_my_orders"
 
     # "show my orders" / "recommend something for me" always mean these features, whatever the classifier guessed.
     if intent in ("fallback", "order_tracking", "product_search") and not _ORDER_NO_RE.search(message) and _MY_ORDERS_RE.search(message):
-        intent, action = ("customer_account", "get_my_orders") if customer_id else ("order_tracking", "list_recent_orders")
+        intent, action = "customer_account", "get_my_orders"
     elif intent in ("fallback", "product_search") and _RECOMMEND_RE.search(message) and not any(
             entities.get(k) not in (None, "", []) for k in ("query", "category", "color", "price_min", "price_max")):
         intent, action = "customer_account", "get_recommendations"
@@ -958,7 +962,7 @@ async def customer_session(request: Request):
         # Refresh the lightweight purchase summary at most once per hour.
         stale=(int(profile.get("synced_at") or 0) + 3600) < int(time.time())
         if stale or not profile.get("purchased_product_ids"):
-            order_data=await shopify_actions.get_customer_orders(store,customer_id,first=50)
+            order_data=await shopify_actions.get_customer_orders(store,customer_id,first=50,max_orders=50)
             if not order_data.get("error"): fields["purchased_product_ids"]=order_data.get("purchased_product_ids") or []
             names=[]; variants=[]
             for order in (order_data.get("active_orders") or [])+(order_data.get("past_orders") or []):
@@ -2051,12 +2055,12 @@ WIDGET_JS = r"""
     });
   }
 
-  function sendMessage(text) {
+  function sendMessage(text, isRetry) {
     text = (text || "").trim();
     if (!text) return;
     var nameUpdate = tryExtractNameFromMessage(text);
     tryExtractEmailFromMessage(text);
-    addBubble(text, "user");
+    if (!isRetry) addBubble(text, "user");
     input.value = "";
     micBtn.classList.remove("has-text");
 
@@ -2083,6 +2087,16 @@ WIDGET_JS = r"""
       .then(function (res) { return res.json(); })
       .then(function (data) {
         typingEl.remove();
+        if (data && data.session_expired && !isRetry) {
+          // Login token expired while the page stayed open: refresh it, then resend once.
+          customerToken = null;
+          try { sessionStorage.removeItem(CUSTOMER_TOKEN_KEY); } catch (e) {}
+          return loadCustomerSession().then(function () { sendMessage(text, true); });
+        }
+        if (data && data.session_expired) {
+          addBubble("Your login session has expired. Please refresh the page and try again.", "bot");
+          return;
+        }
         handleChatResponse(data);
       })
       .catch(function () {
