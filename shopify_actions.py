@@ -49,6 +49,7 @@ works exactly as before, just without the live-location fields.
 SHOPIFY_API_VERSION: bump this as Shopify deprecates old ones.
 """
 
+import inspect
 import os
 import re
 import httpx
@@ -64,6 +65,34 @@ def _headers(store) -> dict:
 
 def _url(store, path: str) -> str:
     return f"https://{store.shop_domain}/admin/api/{SHOPIFY_API_VERSION}/{path}"
+
+
+def _access_error(order: dict, email: str, customer_id, order_number: str, what: str = "looked up") -> dict | None:
+    """Decides whether the requester may see/act on this order.
+    Returns None when access is granted, otherwise the error dict to return.
+
+      1. A logged-in shopper (customer_id comes from a verified app-proxy
+         session token) may access any order linked to their own account -
+         no email needed.
+      2. Otherwise (guest order, or not logged in) the email they give must
+         match the one on the order.
+    """
+    if customer_id and str((order.get("customer") or {}).get("id") or "") == str(customer_id):
+        return None
+    if not email:
+        msg = ("This order isn't linked to your account. Please confirm the email address used on it."
+               if customer_id else
+               f"For privacy, please confirm the email address used on this order before it can be {what}.")
+        return {"error": "verification_required", "order_number": order_number, "message": msg}
+    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
+    if not order_email or order_email != email:
+        print(f"_access_error: email mismatch for #{order_number} (order email present: {bool(order_email)})")
+        return {
+            "error": "verification_failed",
+            "order_number": order_number,
+            "message": "That email doesn't match our records for this order. Order details can only be shared with the email on file.",
+        }
+    return None
 
 
 def _extract_order_number(entities: dict, message: str = "") -> str | None:
@@ -122,10 +151,14 @@ async def get_customer(store, customer_id: str) -> dict | None:
     return (data or {}).get("customer")
 
 
-async def get_customer_orders(store, customer_id: str, first: int=50) -> dict:
+async def get_customer_orders(store, customer_id: str, first: int=50, max_orders: int=200) -> dict:
+    """All of a customer's orders, newest first, following pagination up to
+    max_orders. NOTE: Shopify only returns the last 60 days of orders unless
+    the app has the `read_all_orders` access scope."""
     query="""
-    query CustomerOrders($first: Int!, $query: String!) {
-      orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+    query CustomerOrders($first: Int!, $after: String, $query: String!) {
+      orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id name createdAt cancelledAt displayFinancialStatus displayFulfillmentStatus
           totalPriceSet { shopMoney { amount currencyCode } }
@@ -135,8 +168,19 @@ async def get_customer_orders(store, customer_id: str, first: int=50) -> dict:
       }
     }
     """
-    data=await _graphql_admin(store,query,{"first":min(max(first,1),100),"query":f"customer_id:{customer_id}"})
-    if data is None: return {"error":"lookup_failed","message":"Could not load your orders from the store right now."}
+    page_size=min(max(first,1),100)
+    all_nodes=[]; after=None
+    while len(all_nodes)<max_orders:
+        data=await _graphql_admin(store,query,{"first":page_size,"after":after,"query":f"customer_id:{customer_id}"})
+        if data is None:
+            if all_nodes: break  # return what we already have rather than nothing
+            return {"error":"lookup_failed","message":"Could not load your orders from the store right now."}
+        page=(data or {}).get("orders") or {}
+        all_nodes.extend(page.get("nodes") or [])
+        info=page.get("pageInfo") or {}
+        if not info.get("hasNextPage") or not info.get("endCursor"): break
+        after=info["endCursor"]
+    data={"orders":{"nodes":all_nodes}}
     nodes=((data or {}).get("orders") or {}).get("nodes") or []
     active=[]; past=[]; purchased=[]
     for order in nodes:
@@ -397,13 +441,15 @@ async def forgot_password(store, entities: dict, session_id: str) -> dict:
 # ==========================================================================
 # order_tracking
 # ==========================================================================
-async def track_order(store, entities: dict, session_id: str) -> dict:
+async def track_order(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     order_number = _extract_order_number(entities)
     if not order_number:
         return {"error": "missing_order_number", "message": "No order number was given."}
 
     email = (entities.get("email") or "").strip().lower()
-    if not email:
+    # Guests must give an email up front; logged-in shoppers are checked
+    # against the order's customer after the lookup.
+    if not email and not customer_id:
         return {
             "error": "verification_required",
             "order_number": order_number,
@@ -421,14 +467,9 @@ async def track_order(store, entities: dict, session_id: str) -> dict:
         return {"error": "not_found", "order_number": order_number}
 
     order = orders[0]
-    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
-    if not order_email or order_email != email:
-        print(f"track_order: email mismatch for #{order_number} (order email present: {bool(order_email)})")
-        return {
-            "error": "verification_failed",
-            "order_number": order_number,
-            "message": "That email doesn't match our records for this order. Order details can only be shared with the email on file.",
-        }
+    err = _access_error(order, email, customer_id, order_number)
+    if err:
+        return err
 
     tracking_number, tracking_url, native_shipment_status = None, None, None
     for f in order.get("fulfillments", []):
@@ -658,14 +699,14 @@ async def clear_cart(store, entities: dict, session_id: str) -> dict:
 # it as an order tag + note that shows up for the merchant in Admin.
 # Swap this for a real helpdesk (Gorgias/Zendesk) API call if you have one.
 # ==========================================================================
-async def submit_claim(store, entities: dict, session_id: str) -> dict:
+async def submit_claim(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     order_number = _extract_order_number(entities)
     issue = entities.get("issue_description", "Not specified")
     if not order_number:
         return {"error": "missing_order_number"}
 
     email = (entities.get("email") or "").strip().lower()
-    if not email:
+    if not email and not customer_id:
         return {
             "error": "verification_required",
             "order_number": order_number,
@@ -677,13 +718,9 @@ async def submit_claim(store, entities: dict, session_id: str) -> dict:
         return {"error": "not_found", "order_number": order_number}
 
     order = resp.json()["orders"][0]
-    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
-    if not order_email or order_email != email:
-        return {
-            "error": "verification_failed",
-            "order_number": order_number,
-            "message": "That email doesn't match our records for this order.",
-        }
+    err = _access_error(order, email, customer_id, order_number, "used to file a claim")
+    if err:
+        return err
 
     existing_tags = order.get("tags", "")
     new_tags = ", ".join(filter(None, [existing_tags, "warranty-claim"]))
@@ -695,13 +732,13 @@ async def submit_claim(store, entities: dict, session_id: str) -> dict:
     return {"status": "submitted", "order_number": order_number, "issue": issue}
 
 
-async def check_claim_status(store, entities: dict, session_id: str) -> dict:
+async def check_claim_status(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     order_number = _extract_order_number(entities)
     if not order_number:
         return {"error": "missing_order_number"}
 
     email = (entities.get("email") or "").strip().lower()
-    if not email:
+    if not email and not customer_id:
         return {
             "error": "verification_required",
             "order_number": order_number,
@@ -713,13 +750,9 @@ async def check_claim_status(store, entities: dict, session_id: str) -> dict:
         return {"error": "not_found", "order_number": order_number}
 
     order = resp.json()["orders"][0]
-    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
-    if not order_email or order_email != email:
-        return {
-            "error": "verification_failed",
-            "order_number": order_number,
-            "message": "That email doesn't match our records for this order.",
-        }
+    err = _access_error(order, email, customer_id, order_number, "checked")
+    if err:
+        return err
 
     tags = order.get("tags", "")
     if "warranty-claim" in tags:
@@ -839,6 +872,8 @@ async def dispatch(intent: str, action: str, store, entities: dict, session_id: 
     fn = ACTION_MAP.get(key)
     if fn is None:
         return {"error": f"No handler registered for {key}"}
-    if intent == "customer_account":
+    # Hand the verified customer id to every handler that can use it
+    # (track_order, submit_claim, check_claim_status, get_my_orders, ...).
+    if "customer_id" in inspect.signature(fn).parameters:
         return await fn(store, entities, session_id, customer_id=customer_id)
     return await fn(store, entities, session_id)
