@@ -81,8 +81,56 @@ def _price(product: dict) -> float | None:
         return None
 
 
+def _is_product_in_stock(product: dict) -> bool:
+    """
+    Checks if a product has at least one purchasable, in-stock variant.
+    Filters out sold-out items (availableForSale == False, inventory <= 0, or 'sold out' tags).
+    """
+    if product.get("availableForSale") is False or product.get("available_for_sale") is False:
+        return False
+
+    tags = product.get("tags") or []
+    if isinstance(tags, str):
+        tag_list = [t.strip().lower() for t in tags.split(",")]
+    else:
+        tag_list = [str(t).strip().lower() for t in tags]
+
+    if any(t in ("sold out", "out of stock", "discontinued", "backorder") for t in tag_list):
+        return False
+
+    variants = product.get("variants") or []
+    if not variants:
+        return False
+
+    has_available_variant = False
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        v_avail = v.get("availableForSale") if "availableForSale" in v else v.get("available_for_sale")
+        if v_avail is False:
+            continue
+
+        v_qty = v.get("inventory_quantity") if "inventory_quantity" in v else v.get("inventoryQuantity")
+        if v_qty is not None:
+            try:
+                if int(v_qty) <= 0:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        has_available_variant = True
+        break
+
+    return has_available_variant
+
+
 def _format_card(product: dict, store, score_reason: str = "") -> dict[str, Any]:
-    variant = (product.get("variants") or [{}])[0] or {}
+    variants = product.get("variants") or [{}]
+    # Pick the first in-stock variant if multiple variants exist
+    variant = next(
+        (v for v in variants if isinstance(v, dict) and v.get("availableForSale") is not False and (v.get("inventory_quantity") is None or v.get("inventory_quantity") > 0)),
+        variants[0] if variants else {}
+    )
     price = _price(product)
     if price is not None and price.is_integer():
         price = int(price)
@@ -130,6 +178,11 @@ async def recommend_products(
     catalog = await get_enriched_catalog(store)
     if not catalog:
         return {"results": [], "reason": "catalog_unavailable"}
+
+    # 2. Filter out out-of-stock / sold-out items
+    in_stock_catalog = [p for p in catalog if _is_product_in_stock(p)]
+    if in_stock_catalog:
+        catalog = in_stock_catalog
 
 
     # 3. Filter by conversational budget or category constraints if specified
