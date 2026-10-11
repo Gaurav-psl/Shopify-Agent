@@ -184,33 +184,9 @@ async def get_my_orders(store, entities: dict, session_id: str, customer_id: str
 
 
 async def get_recommendations(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
-    import customer_profiles, recommendation_engine
-    profile = (await customer_profiles.get_profile(store.shop_domain, customer_id) or {}) if customer_id else {}
-    if customer_id and not profile.get("purchased_product_ids"):
-        # Stored profile missing/empty (first visit, DB not configured, sync not run yet): read the orders live.
-        live = await get_customer_orders(store, customer_id, first=50)
-        if not live.get("error"):
-            names = [i.get("name") for o in (live.get("active_orders") or []) + (live.get("past_orders") or []) for i in (o.get("items") or []) if i.get("name")]
-            profile = {**profile, "purchased_product_ids": live.get("purchased_product_ids") or [], "top_types": list(dict.fromkeys(names))[:20]}
-    
-    visitor_id = entities.get("visitor_id") or entities.get("_visitor_id")
-    result = await recommendation_engine.recommend_products(
-        store,
-        customer_profile=profile,
-        visitor_id=visitor_id,
-        customer_id=customer_id,
-        limit=6,
-        price_max=entities.get("price_max"),
-        category=entities.get("category"),
-    )
-    result["based_on"] = {
-        "previous_orders": bool(profile.get("purchased_product_ids")),
-        "recent_searches": (profile.get("recent_searches") or [])[:3],
-        "website_activity": result.get("based_on", {}),
-    }
-    if not customer_id and not result.get("based_on", {}).get("user_clicks"):
-        result["note"] = "These are our trending bestsellers. Explore or click any product to get customized picks tailored to your style!"
-    return result
+    import behavioral_recommender
+    return await behavioral_recommender.handle_recommendations(store, entities, session_id, customer_id)
+
 
 # ==========================================================================
 # Storefront API — cart engine

@@ -1,0 +1,260 @@
+"""
+behavioral_recommender.py
+-------------------------
+Multi-signal personalized product recommendation engine powered by:
+  1. User website activity & click monitoring (visitor cookie / session / customer).
+  2. Subcategory and metadata taxonomy (via product_enrichment.py).
+  3. Shopify customer purchase history & orders (via customer_profiles.py).
+  4. Global click popularity & trending items for cold-start visitors.
+"""
+
+from __future__ import annotations
+import re
+from collections import Counter
+from typing import Any
+
+import activity_tracker
+import product_enrichment
+import shopify_actions
+
+_STOP = {"the", "and", "for", "with", "new", "small", "large", "medium"}
+
+
+def _words(value) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", str(value or "").lower()) if len(w) >= 3 and w not in _STOP}
+
+
+def _num_id(value) -> str:
+    """Normalises gid://shopify/Product/123 and 123 to '123'."""
+    m = re.search(r"(\d+)\s*$", str(value or ""))
+    return m.group(1) if m else str(value or "")
+
+
+def _price(product: dict) -> float | None:
+    try:
+        variants = product.get("variants") or [{}]
+        return float(variants[0].get("price"))
+    except (TypeError, ValueError, AttributeError, IndexError):
+        return None
+
+
+def _format_card(product: dict, store, score_reason: str = "") -> dict[str, Any]:
+    variant = (product.get("variants") or [{}])[0] or {}
+    price = _price(product)
+    if price is not None and price.is_integer():
+        price = int(price)
+    image = product.get("image") or ""
+    if isinstance(image, dict):
+        image = image.get("src", "")
+    
+    meta = product.get("_metadata") or {}
+    card = {
+        "id": str(variant.get("id") or ""),
+        "product_id": _num_id(product.get("id")),
+        "name": product.get("title", "Unnamed product"),
+        "price": price,
+        "image": image,
+        "category": meta.get("category", "General"),
+        "sub_category": meta.get("sub_category", "Products"),
+        "style": meta.get("style", "Casual"),
+        "reason": score_reason or "Recommended pick",
+    }
+    if product.get("handle"):
+        card["url"] = f"https://{store.shop_domain}/products/{product['handle']}"
+    return card
+
+
+async def recommend_products(
+    store,
+    customer_profile: dict | None = None,
+    visitor_id: str | None = None,
+    customer_id: str | None = None,
+    limit: int = 6,
+    price_max: float | str | None = None,
+    category: str | None = None,
+    target_product_id: str | int | None = None,
+) -> dict[str, Any]:
+    """
+    Computes personalized product recommendations for the shopper using:
+      - Live website clicks and views (from activity_tracker)
+      - Enriched subcategory & style taxonomy (from product_enrichment)
+      - Past Shopify purchases and preferences (from customer_profile)
+      - Global trending items (cold-start fallback)
+    """
+    shop_domain = getattr(store, "shop_domain", "") or ""
+
+    # 1. Fetch raw product catalog from Shopify GraphQL / Storefront
+    raw_catalog = await shopify_actions.get_active_products_graphql(store, first=100)
+    if not raw_catalog:
+        return {"results": [], "reason": "catalog_unavailable"}
+
+    # 2. Enrich catalog with subcategories, style, fit, and price brackets
+    catalog = product_enrichment.enrich_catalog(raw_catalog)
+
+    # 3. Filter by conversational budget or category constraints if specified
+    try:
+        price_cap = float(price_max) if price_max not in (None, "") else None
+    except (TypeError, ValueError):
+        price_cap = None
+
+    category_words = _words(category) if category else set()
+    if price_cap or category_words:
+        def _fits(p):
+            p_price = _price(p)
+            if price_cap and p_price is not None and p_price > price_cap:
+                return False
+            if category_words:
+                meta = p.get("_metadata", {})
+                p_text = f"{p.get('title', '')} {meta.get('sub_category', '')} {meta.get('category', '')}"
+                if not (category_words & _words(p_text)):
+                    return False
+            return True
+        catalog = [p for p in catalog if _fits(p)]
+        if not catalog:
+            return {"results": [], "reason": "no_match_for_filters"}
+
+    # 4. Gather User Behavioral Signals (Clicks, Views, Cart history)
+    user_activity = activity_tracker.get_user_activity_summary(shop_domain, visitor_id, customer_id)
+    user_click_counts = user_activity.get("product_click_counts", {})
+    user_subcat_affinity = dict(user_activity.get("top_subcategories", []))
+    user_style_affinity = dict(user_activity.get("top_styles", []))
+    trending_pids = set(activity_tracker.get_trending_product_ids(shop_domain, limit=10))
+
+    # 5. Gather Customer Purchase Signals (from Shopify Orders)
+    profile = customer_profile or {}
+    purchased_ids = {_num_id(x) for x in (profile.get("purchased_product_ids") or [])}
+    budget_max = profile.get("budget_max") or 0
+    fav_colors = {str(c).lower() for c in (profile.get("favorite_colors") or [])}
+
+    # 6. Score and Rank Each Product
+    scored_items: list[tuple[float, dict, str]] = []
+
+    for product in catalog:
+        pid = _num_id(product.get("id"))
+        meta = product.get("_metadata", {})
+        subcat = meta.get("sub_category", "")
+        style = meta.get("style", "")
+        primary_color = str(meta.get("primary_color", "")).lower()
+
+        score = 0.0
+        reasons = []
+
+        # Signal A: Direct clicks on this product by user
+        direct_clicks = user_click_counts.get(pid, 0)
+        if direct_clicks > 0:
+            score += direct_clicks * 5.0
+            reasons.append("Frequently viewed by you")
+
+        # Signal B: Subcategory affinity (e.g. user clicked multiple Graphic Tees)
+        subcat_weight = user_subcat_affinity.get(subcat, 0)
+        if subcat_weight > 0:
+            score += subcat_weight * 3.5
+            if not reasons:
+                reasons.append(f"Based on your interest in {subcat}")
+
+        # Signal C: Style affinity (e.g. user browses Streetwear / Oversized)
+        style_weight = user_style_affinity.get(style, 0)
+        if style_weight > 0:
+            score += style_weight * 2.0
+
+        # Signal D: Past purchase penalty (don't re-recommend what they already own)
+        if pid in purchased_ids:
+            score -= 10.0
+        else:
+            score += 1.0
+
+        # Signal E: Color preference
+        if primary_color in fav_colors:
+            score += 2.5
+
+        # Signal F: Budget alignment
+        p_price = _price(product)
+        if budget_max and p_price is not None:
+            if p_price <= budget_max:
+                score += 2.0
+            elif p_price > budget_max * 1.5:
+                score -= 2.0
+
+        # Signal G: Global trending popularity
+        if pid in trending_pids:
+            score += 3.0
+            if not reasons:
+                reasons.append("Trending bestseller on store")
+
+        # Signal H: New arrival tag boost
+        tags_str = " ".join(meta.get("tags", []))
+        if any(w in tags_str for w in ("new", "arrival", "drop", "fresh")):
+            score += 1.5
+
+        final_reason = reasons[0] if reasons else ("Top pick for you" if user_activity.get("total_clicks", 0) > 0 else "Curated bestseller")
+        scored_items.append((score, product, final_reason))
+
+    # Sort descending by composite score
+    scored_items.sort(key=lambda item: item[0], reverse=True)
+
+    # Filter out purchased items unless catalog is small
+    unseen_items = [item for item in scored_items if _num_id(item[1].get("id")) not in purchased_ids]
+    if len(unseen_items) >= min(limit, 3):
+        scored_items = unseen_items
+
+    has_personalization = bool(user_activity.get("total_clicks", 0) > 0 or purchased_ids)
+
+    return {
+        "results": [_format_card(p, store, score_reason=r) for _, p, r in scored_items[:limit]],
+        "reason": "personalized_activity" if has_personalization else "catalog_bestsellers",
+        "based_on": {
+            "user_clicks": user_activity.get("total_clicks", 0),
+            "top_subcategories": [s for s, _ in user_activity.get("top_subcategories", [])[:3]],
+            "previous_orders": bool(purchased_ids),
+        },
+    }
+
+
+async def handle_recommendations(
+    store,
+    entities: dict,
+    session_id: str,
+    customer_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Main entrypoint called by shopify_actions router.
+    Resolves customer profile / live orders, gathers visitor session entities,
+    and runs multi-signal behavioral recommendations.
+    """
+    import customer_profiles
+    profile = (await customer_profiles.get_profile(store.shop_domain, customer_id) or {}) if customer_id else {}
+    if customer_id and not profile.get("purchased_product_ids"):
+        # Stored profile missing/empty (first visit, DB not configured, sync not run yet): read the orders live.
+        live = await shopify_actions.get_customer_orders(store, customer_id, first=50)
+        if not live.get("error"):
+            names = [
+                i.get("name")
+                for o in (live.get("active_orders") or []) + (live.get("past_orders") or [])
+                for i in (o.get("items") or [])
+                if i.get("name")
+            ]
+            profile = {
+                **profile,
+                "purchased_product_ids": live.get("purchased_product_ids") or [],
+                "top_types": list(dict.fromkeys(names))[:20],
+            }
+
+    visitor_id = entities.get("visitor_id") or entities.get("_visitor_id")
+    result = await recommend_products(
+        store,
+        customer_profile=profile,
+        visitor_id=visitor_id,
+        customer_id=customer_id,
+        limit=6,
+        price_max=entities.get("price_max"),
+        category=entities.get("category"),
+    )
+    result["based_on"] = {
+        "previous_orders": bool(profile.get("purchased_product_ids")),
+        "recent_searches": (profile.get("recent_searches") or [])[:3],
+        "website_activity": result.get("based_on", {}),
+    }
+    if not customer_id and not result.get("based_on", {}).get("user_clicks"):
+        result["note"] = "These are our trending bestsellers. Explore or click any product to get customized picks tailored to your style!"
+    return result
+
