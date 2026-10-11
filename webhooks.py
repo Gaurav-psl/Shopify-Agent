@@ -87,3 +87,30 @@ async def shop_redact(request: Request):
     if shop:
         repo.delete_shop(shop)
     return PlainTextResponse("ok")
+
+
+@router.post("/products/update")
+@router.post("/products/create")
+@router.post("/products/delete")
+async def products_webhook(request: Request):
+    body = await _verify(request)
+    if body is None:
+        return PlainTextResponse("Invalid HMAC", status_code=401)
+    shop = request.headers.get("X-Shopify-Shop-Domain")
+    if shop:
+        import behavioral_recommender
+        behavioral_recommender.invalidate_catalog_cache(shop)
+    return PlainTextResponse("ok")
+
+
+@router.post("/inventory_levels/update")
+@router.post("/inventory_items/update")
+async def inventory_webhook(request: Request):
+    body = await _verify(request)
+    if body is None:
+        return PlainTextResponse("Invalid HMAC", status_code=401)
+    shop = request.headers.get("X-Shopify-Shop-Domain")
+    if shop:
+        import behavioral_recommender
+        behavioral_recommender.invalidate_catalog_cache(shop)
+    return PlainTextResponse("ok")

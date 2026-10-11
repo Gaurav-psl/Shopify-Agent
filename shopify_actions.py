@@ -139,13 +139,20 @@ async def get_customer_orders(store, customer_id: str, first: int=50) -> dict:
     if data is None: return {"error":"lookup_failed","message":"Could not load your orders from the store right now."}
     nodes=((data or {}).get("orders") or {}).get("nodes") or []
     active=[]; past=[]; purchased=[]
+    order_baskets = []
     for order in nodes:
         items=[]
+        order_pids=[]
         for line in (order.get("lineItems") or {}).get("nodes") or []:
             variant=line.get("variant") or {}
             product=line.get("product") or {}
-            if product.get("id"): purchased.append(str(product["id"]).split("/")[-1])
+            if product.get("id"):
+                p_id = str(product["id"]).split("/")[-1]
+                purchased.append(p_id)
+                order_pids.append(p_id)
             items.append({"name":line.get("name"),"quantity":line.get("quantity"),"variant":variant.get("title")})
+        if len(order_pids) > 1:
+            order_baskets.append(order_pids)
         total=(order.get("totalPriceSet") or {}).get("shopMoney") or {}
         fulfillment=(order.get("displayFulfillmentStatus") or "").lower()
         if order.get("cancelledAt"): fulfillment="cancelled"
@@ -158,7 +165,15 @@ async def get_customer_orders(store, customer_id: str, first: int=50) -> dict:
         }
         if fulfillment in {"fulfilled","shipped","delivered","cancelled","restocked"}: past.append(entry)
         else: active.append(entry)
-    return {"active_orders":active,"past_orders":past,"purchased_product_ids":list(dict.fromkeys(purchased))}
+
+    if order_baskets:
+        try:
+            import activity_tracker
+            activity_tracker.record_order_cooccurrences(getattr(store, "shop_domain", ""), order_baskets)
+        except Exception:
+            pass
+
+    return {"active_orders":active,"past_orders":past,"purchased_product_ids":list(dict.fromkeys(purchased)),"order_baskets":order_baskets}
 
 
 async def get_active_products_graphql(store, first: int=100) -> list[dict]:

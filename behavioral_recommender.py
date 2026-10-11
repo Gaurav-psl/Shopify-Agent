@@ -164,12 +164,15 @@ async def recommend_products(
     price_max: float | str | None = None,
     category: str | None = None,
     target_product_id: str | int | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Computes personalized product recommendations for the shopper using:
       - Live website clicks and views (from activity_tracker)
       - Enriched subcategory & style taxonomy (from product_enrichment)
       - Past Shopify purchases and preferences (from customer_profile)
+      - Order & browsing co-occurrence ("Frequently Bought Together")
+      - Session fatigue suppression (prioritizes fresh unseen products)
       - Global trending items (cold-start fallback)
     """
     shop_domain = getattr(store, "shop_domain", "") or ""
@@ -183,7 +186,6 @@ async def recommend_products(
     in_stock_catalog = [p for p in catalog if _is_product_in_stock(p)]
     if in_stock_catalog:
         catalog = in_stock_catalog
-
 
     # 3. Filter by conversational budget or category constraints if specified
     try:
@@ -220,7 +222,14 @@ async def recommend_products(
     budget_max = profile.get("budget_max") or 0
     fav_colors = {str(c).lower() for c in (profile.get("favorite_colors") or [])}
 
-    # 6. Score and Rank Each Product
+    # 6. Gather Co-Occurrence and Session Fatigue Signals
+    anchor_pids = list(user_click_counts.keys()) + list(purchased_ids)
+    if target_product_id:
+        anchor_pids.append(_num_id(target_product_id))
+    fbt_affinities = activity_tracker.get_cooccurring_affinities(shop_domain, anchor_pids)
+    shown_pids = activity_tracker.get_session_shown_products(session_id) if session_id else set()
+
+    # 7. Score and Rank Each Product
     scored_items: list[tuple[float, dict, str]] = []
 
     for product in catalog:
@@ -251,17 +260,24 @@ async def recommend_products(
         if style_weight > 0:
             score += style_weight * 2.0
 
-        # Signal D: Past purchase penalty (don't re-recommend what they already own)
+        # Signal D: Frequently Bought Together (Order & Browsing Co-Occurrence)
+        fbt_weight = fbt_affinities.get(pid, 0)
+        if fbt_weight > 0:
+            score += min(float(fbt_weight) * 3.0, 9.0)
+            if not reasons:
+                reasons.append("Frequently bought together with your items")
+
+        # Signal E: Past purchase penalty (don't re-recommend what they already own)
         if pid in purchased_ids:
             score -= 10.0
         else:
             score += 1.0
 
-        # Signal E: Color preference
+        # Signal F: Color preference
         if primary_color in fav_colors:
             score += 2.5
 
-        # Signal F: Budget alignment
+        # Signal G: Budget alignment
         p_price = _price(product)
         if budget_max and p_price is not None:
             if p_price <= budget_max:
@@ -269,16 +285,24 @@ async def recommend_products(
             elif p_price > budget_max * 1.5:
                 score -= 2.0
 
-        # Signal G: Global trending popularity
+        # Signal H: Global trending popularity
         if pid in trending_pids:
             score += 3.0
             if not reasons:
                 reasons.append("Trending bestseller on store")
 
-        # Signal H: New arrival tag boost
+        # Signal I: New arrival tag boost
         tags_str = " ".join(meta.get("tags", []))
         if any(w in tags_str for w in ("new", "arrival", "drop", "fresh")):
             score += 1.5
+
+        # Signal J: Session Fatigue / Repetition Suppression
+        if pid in shown_pids:
+            # Heavily demote unclicked items already shown in this chat session
+            if pid not in user_click_counts:
+                score -= 25.0
+            else:
+                score -= 5.0
 
         final_reason = reasons[0] if reasons else ("Top pick for you" if user_activity.get("total_clicks", 0) > 0 else "Curated bestseller")
         scored_items.append((score, product, final_reason))
@@ -286,20 +310,40 @@ async def recommend_products(
     # Sort descending by composite score
     scored_items.sort(key=lambda item: item[0], reverse=True)
 
-    # Filter out purchased items unless catalog is small
-    unseen_items = [item for item in scored_items if _num_id(item[1].get("id")) not in purchased_ids]
-    if len(unseen_items) >= min(limit, 3):
-        scored_items = unseen_items
+    # Filter out purchased items and prioritize items never shown in this session
+    fresh_unseen_items = [
+        item for item in scored_items
+        if _num_id(item[1].get("id")) not in purchased_ids and _num_id(item[1].get("id")) not in shown_pids
+    ]
+    if len(fresh_unseen_items) >= min(limit, 3):
+        tail_items = [
+            item for item in scored_items
+            if _num_id(item[1].get("id")) not in purchased_ids and _num_id(item[1].get("id")) in shown_pids
+        ]
+        scored_items = fresh_unseen_items + tail_items
+    else:
+        unseen_items = [item for item in scored_items if _num_id(item[1].get("id")) not in purchased_ids]
+        if len(unseen_items) >= min(limit, 3):
+            scored_items = unseen_items
 
-    has_personalization = bool(user_activity.get("total_clicks", 0) > 0 or purchased_ids)
+    selected_cards = [_format_card(p, store, score_reason=r) for _, p, r in scored_items[:limit]]
+
+    # Remember displayed cards for this session to prevent duplicate carousels
+    if session_id and selected_cards:
+        activity_tracker.record_session_shown_products(
+            session_id, [c.get("product_id") for c in selected_cards if c.get("product_id")]
+        )
+
+    has_personalization = bool(user_activity.get("total_clicks", 0) > 0 or purchased_ids or fbt_affinities)
 
     return {
-        "results": [_format_card(p, store, score_reason=r) for _, p, r in scored_items[:limit]],
+        "results": selected_cards,
         "reason": "personalized_activity" if has_personalization else "catalog_bestsellers",
         "based_on": {
             "user_clicks": user_activity.get("total_clicks", 0),
             "top_subcategories": [s for s, _ in user_activity.get("top_subcategories", [])[:3]],
             "previous_orders": bool(purchased_ids),
+            "cooccurrence_matched": bool(fbt_affinities),
         },
     }
 
@@ -332,6 +376,8 @@ async def handle_recommendations(
                 "purchased_product_ids": live.get("purchased_product_ids") or [],
                 "top_types": list(dict.fromkeys(names))[:20],
             }
+            if live.get("order_baskets"):
+                activity_tracker.record_order_cooccurrences(store.shop_domain, live.get("order_baskets") or [])
 
     visitor_id = entities.get("visitor_id") or entities.get("_visitor_id")
     result = await recommend_products(
@@ -342,6 +388,7 @@ async def handle_recommendations(
         limit=6,
         price_max=entities.get("price_max"),
         category=entities.get("category"),
+        session_id=session_id,
     )
     result["based_on"] = {
         "previous_orders": bool(profile.get("purchased_product_ids")),

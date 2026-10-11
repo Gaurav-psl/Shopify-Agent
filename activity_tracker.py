@@ -51,6 +51,20 @@ _ACTIVITY_STORE: dict[str, list[dict]] = defaultdict(list)
 _STORE_TRENDING_CLICKS: dict[str, Counter] = defaultdict(Counter)
 _MAX_USER_EVENTS = 100
 
+# ---------------------------------------------------------------------------
+# Session Shown Products (Repetition Suppression / Discovery Fatigue Prevention)
+# Keyed by session_id -> set of product IDs already displayed in carousel
+# ---------------------------------------------------------------------------
+_SESSION_SHOWN_PRODUCTS: dict[str, set[str]] = defaultdict(set)
+_SESSION_SHOWN_EXPIRY: dict[str, float] = {}
+_SESSION_SHOWN_TTL_SECONDS = 7200  # 2 hours
+
+# ---------------------------------------------------------------------------
+# Store-level Order & Browsing Co-Occurrence Matrix ("Frequently Bought Together")
+# Keyed by shop_domain -> { product_id: Counter({ co_product_id: weight }) }
+# ---------------------------------------------------------------------------
+_STORE_COOCCURRENCE: dict[str, dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))
+
 
 def _identity_key(shop: str, visitor_id: str | None, customer_id: str | None = None) -> str:
     """Computes a unified identity key, favoring customer_id when authenticated."""
@@ -111,10 +125,20 @@ def track_activity(
                     history.append(past_event)
             _ACTIVITY_STORE[anon_key] = []
 
-    # 2. Update global store trending click count
+    # 2. Update global store trending click count and browsing co-occurrence
     norm_shop = (shop or "").strip().lower()
-    if event_type in ("product_click", "product_view") and pid_str:
-        _STORE_TRENDING_CLICKS[norm_shop][pid_str] += 1
+    if event_type in ("product_click", "product_view", "cart_add") and pid_str:
+        if event_type in ("product_click", "product_view"):
+            _STORE_TRENDING_CLICKS[norm_shop][pid_str] += 1
+
+        # Learn co-browsing pairs: pair current product with recent products user engaged with
+        recent_engaged_pids = {
+            ev.get("product_id") for ev in history[-6:]
+            if ev.get("product_id") and ev.get("product_id") != pid_str
+        }
+        for prev_pid in recent_engaged_pids:
+            _STORE_COOCCURRENCE[norm_shop][pid_str][prev_pid] += 1
+            _STORE_COOCCURRENCE[norm_shop][prev_pid][pid_str] += 1
 
     # 3. Asynchronously write to Appwrite analytics_events in background
     def _async_persist():
@@ -234,10 +258,72 @@ def get_trending_product_ids(shop: str, limit: int = 10) -> list[str]:
     return [pid for pid, _ in counter.most_common(limit)]
 
 
+def record_session_shown_products(session_id: str, product_ids: list[str | int]) -> None:
+    """Remembers product IDs presented in this chat session to prevent duplicate carousels."""
+    if not session_id:
+        return
+    s_id = str(session_id).strip()
+    _SESSION_SHOWN_EXPIRY[s_id] = time.time() + _SESSION_SHOWN_TTL_SECONDS
+    for pid in product_ids:
+        if pid:
+            _SESSION_SHOWN_PRODUCTS[s_id].add(str(pid).strip())
+
+
+def get_session_shown_products(session_id: str) -> set[str]:
+    """Returns product IDs that have already been presented in this session."""
+    if not session_id:
+        return set()
+    s_id = str(session_id).strip()
+    if s_id in _SESSION_SHOWN_EXPIRY and time.time() > _SESSION_SHOWN_EXPIRY[s_id]:
+        _SESSION_SHOWN_PRODUCTS.pop(s_id, None)
+        _SESSION_SHOWN_EXPIRY.pop(s_id, None)
+        return set()
+    return set(_SESSION_SHOWN_PRODUCTS.get(s_id, set()))
+
+
+def record_order_cooccurrences(shop: str, order_baskets: list[list[str]]) -> None:
+    """
+    Updates the co-occurrence matrix from multi-item customer orders.
+    Products purchased in the same basket receive high affinity weight (+3).
+    """
+    norm_shop = (shop or "").strip().lower()
+    if not norm_shop or not order_baskets:
+        return
+    for basket in order_baskets:
+        clean_pids = list({str(p).strip() for p in basket if p})
+        for i in range(len(clean_pids)):
+            for j in range(i + 1, len(clean_pids)):
+                p1, p2 = clean_pids[i], clean_pids[j]
+                _STORE_COOCCURRENCE[norm_shop][p1][p2] += 3
+                _STORE_COOCCURRENCE[norm_shop][p2][p1] += 3
+
+
+def get_cooccurring_affinities(shop: str, reference_product_ids: list[str], limit: int = 10) -> Counter:
+    """
+    Aggregates 'Frequently Bought Together' co-occurrence scores for a set of reference products.
+    """
+    norm_shop = (shop or "").strip().lower()
+    store_matrix = _STORE_COOCCURRENCE.get(norm_shop)
+    if not store_matrix or not reference_product_ids:
+        return Counter()
+
+    aggregate: Counter = Counter()
+    ref_set = {str(p).strip() for p in reference_product_ids if p}
+    for ref_pid in ref_set:
+        if ref_pid in store_matrix:
+            for co_pid, count in store_matrix[ref_pid].items():
+                if co_pid not in ref_set:
+                    aggregate[co_pid] += count
+    return aggregate
+
+
 def clear_cache_for_testing() -> None:
     """Helper to reset in-memory caches between unit tests."""
     _ACTIVITY_STORE.clear()
     _STORE_TRENDING_CLICKS.clear()
+    _SESSION_SHOWN_PRODUCTS.clear()
+    _SESSION_SHOWN_EXPIRY.clear()
+    _STORE_COOCCURRENCE.clear()
 
 
 @router.post("/track-activity")
