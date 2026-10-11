@@ -143,58 +143,85 @@ def track_activity(
     return {"status": "ok", "recorded_event": event_type, "product_id": pid_str}
 
 
+def _recency_decay(age_seconds: float) -> float:
+    """
+    Computes an exponential decay weight based on event age:
+      - 0 to 15 mins (active browsing session): 1.0 (100% full weight)
+      - 15 mins to 1 hour:                      0.7 (70% weight)
+      - 1 hour to 4 hours:                      0.4 (40% weight)
+      - > 4 hours:                              0.2 (20% residual baseline)
+    """
+    if age_seconds <= 900:        # 15 minutes
+        return 1.0
+    elif age_seconds <= 3600:     # 1 hour
+        return 0.7
+    elif age_seconds <= 14400:    # 4 hours
+        return 0.4
+    else:
+        return 0.2
+
+
 def get_user_activity_summary(
     shop: str,
     visitor_id: str | None,
     customer_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Returns an aggregated behavioral summary for the user:
-      - clicked_product_ids: list of product IDs clicked (ordered by frequency/recency)
-      - product_click_counts: dict of {product_id: click_count}
-      - top_subcategories: list of (subcategory_name, count)
-      - top_styles: list of (style_name, count)
-      - total_clicks: int total number of product interactions
+    Returns an aggregated behavioral summary for the user with recency time-decay:
+      - clicked_product_ids: list of product IDs clicked (ordered by weighted frequency/recency)
+      - product_click_counts: dict of {product_id: decay_weighted_click_score}
+      - top_subcategories: list of (subcategory_name, weighted_count)
+      - top_styles: list of (style_name, weighted_count)
+      - total_clicks: int total number of raw product clicks
     """
     user_key = _identity_key(shop, visitor_id, customer_id)
     history = _ACTIVITY_STORE.get(user_key, [])
 
-    click_counts: Counter = Counter()
-    view_counts: Counter = Counter()
-    subcat_counts: Counter = Counter()
-    style_counts: Counter = Counter()
+    click_scores: Counter = Counter()
+    view_scores: Counter = Counter()
+    subcat_scores: Counter = Counter()
+    style_scores: Counter = Counter()
     recent_pids: list[str] = []
+    raw_click_count = 0
 
+    now = time.time()
     for ev in history:
         pid = ev.get("product_id")
         subcat = ev.get("sub_category")
         st = ev.get("style")
         etype = ev.get("event_type")
+        event_time = float(ev.get("timestamp") or now)
+        decay = _recency_decay(max(0.0, now - event_time))
+
+        if etype == "product_click":
+            raw_click_count += 1
 
         if pid:
+            base_w = 1.0 if etype == "product_click" else 0.5
+            effective_w = round(base_w * decay, 2)
             if etype == "product_click":
-                click_counts[pid] += 1
+                click_scores[pid] += effective_w
             elif etype == "product_view":
-                view_counts[pid] += 1
+                view_scores[pid] += effective_w
             if pid not in recent_pids:
                 recent_pids.append(pid)
 
         if subcat:
-            weight = 2 if etype == "product_click" else 1
-            subcat_counts[subcat] += weight
+            base_w = 2.0 if etype == "product_click" else 1.0
+            subcat_scores[subcat] += round(base_w * decay, 2)
 
         if st:
-            weight = 2 if etype == "product_click" else 1
-            style_counts[st] += weight
+            base_w = 2.0 if etype == "product_click" else 1.0
+            style_scores[st] += round(base_w * decay, 2)
 
     return {
-        "clicked_product_ids": [pid for pid, _ in click_counts.most_common()],
-        "product_click_counts": dict(click_counts),
-        "viewed_product_ids": [pid for pid, _ in view_counts.most_common()],
-        "top_subcategories": subcat_counts.most_common(5),
-        "top_styles": style_counts.most_common(5),
+        "clicked_product_ids": [pid for pid, _ in click_scores.most_common()],
+        "product_click_counts": dict(click_scores),
+        "viewed_product_ids": [pid for pid, _ in view_scores.most_common()],
+        "top_subcategories": subcat_scores.most_common(5),
+        "top_styles": style_scores.most_common(5),
         "recent_product_ids": list(reversed(recent_pids))[:10],
-        "total_clicks": sum(click_counts.values()),
+        "total_clicks": raw_click_count,
     }
 
 
