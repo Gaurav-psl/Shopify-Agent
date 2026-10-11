@@ -181,8 +181,6 @@ class ConfirmRequest(BaseModel):
     visitor_id: str | None = None  # >>> ADDED (analytics)
 
 
-
-
 _CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
 
 
@@ -231,7 +229,7 @@ def _store_id_for_events(shop: str) -> str | None:
     if cached:
         return cached
     doc = repo._find_store_doc(shop)
-    if doc:
+    if doc:  # uninstalled stores are still recorded, so the data is there if they reinstall
         _EVENT_STORE_IDS[shop] = doc["$id"]
         return doc["$id"]
     return None
@@ -243,15 +241,40 @@ def _write_events(shop: str, events: list) -> None:
         if not store_id:
             return
         for ev in events:
-            repo.record_event(store_id, **ev)
+            repo.record_event(store_id, store_name=shop, **ev)
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: analytics events failed: {e!r}")
 
 
-def _build_events(status: str, intent, action, entities, session_id, visitor_id) -> list:
-    ents = entities if isinstance(entities, dict) else {}
+# Small talk ("hi", "hello", "thanks", "bye", "ok", "how are you"...) is never
+# recorded in the analytics table. Only whole-message matches count, so a real
+# question that merely starts with a greeting ("hi, do you have red shoes?")
+# is still recorded.
+_SMALL_TALK_RE = re.compile(
+    r"^(?:hi+|hello+|hey+|heya|hola|namaste|namaskar|yo|sup|"
+    r"good\s*(?:morning|afternoon|evening|night)|"
+    r"thanks?(?:\s*(?:a\s*lot|so\s*much|you))?|thank\s*you(?:\s*(?:so\s*much|very\s*much))?|thx|ty|"
+    r"ok(?:ay)?|k|cool|great|nice|awesome|fine|got\s*it|alright|"
+    r"bye+|goodbye|see\s*(?:you|ya)|take\s*care|"
+    r"how\s*are\s*you|how\s*r\s*u|what'?s\s*up|who\s*are\s*you|are\s*you\s*(?:a\s*)?(?:bot|human|real))"
+    r"(?:\s+(?:there|again|team|bro|sir|madam|mam|ma'am|buddy|friend|assistant|bot))?$",
+    re.IGNORECASE,
+)
+
+
+def _is_small_talk(message) -> bool:
+    text = " ".join(re.sub(r"[^\w\s']", " ", str(message or "")).lower().split())
+    return bool(text) and bool(_SMALL_TALK_RE.match(text))
+
+
+def _build_events(status: str, intent, action, entities, session_id, visitor_id, message: str = "") -> list:
+    ents = {k: v for k, v in entities.items() if k not in ("session_id", "visitor_id")} if isinstance(entities, dict) else {}
+    # Nothing is recorded for greetings / small talk, or for messages the
+    # assistant couldn't classify at all (no intent, no extracted details).
+    if _is_small_talk(message) or (intent in (None, "fallback") and not ents):
+        return []
     base = {"platform": "shopify", "session_id": session_id or "", "visitor_id": visitor_id or ""}
-    events = [{**base, "event_type": "chat_message", "name": str(intent or "")}]
+    events = [{**base, "event_type": "chat_message"}]
     if status == "done" and (intent, action) == ("product_search", "search_products"):
         term = ents.get("query") or ents.get("category")
         if isinstance(term, str) and term.strip():
@@ -295,7 +318,9 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
         _sid2 = None if _sid2 == "anonymous" else (str(_sid2)[:80] if _sid2 else None)
         _vid2 = _CURRENT_VISITOR_ID.get()
         _vid2 = str(_vid2)[:80] if _vid2 else None
-        _EVENT_POOL.submit(_write_events, shop, _build_events(status, intent, action, entities, _sid2, _vid2))
+        _events = _build_events(status, intent, action, entities, _sid2, _vid2, message)
+        if _events:
+            _EVENT_POOL.submit(_write_events, shop, _events)
     except Exception as e:  # noqa: BLE001
         print(f"chatbot_widget: analytics events failed: {e!r}")
     # <<< END ADDED
@@ -705,10 +730,6 @@ async def _chat_impl(req: ChatRequest):
         return {"reply": "This assistant isn't available right now."}
 
     customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
-    if req.customer_token and not customer_id:
-        # Token expired (2h TTL) or invalid: don't silently treat a logged-in
-        # shopper as a guest - tell the widget to refresh its session and retry.
-        return {"reply": "", "session_expired": True}
     _remember_customer(req.shop, req.session_id, customer_id)
     customer_profile = await customer_profiles.get_profile(req.shop, customer_id) if customer_id else None
 
@@ -788,16 +809,16 @@ async def _chat_impl(req: ChatRequest):
     #    (active + past) with no email needed; a logged-out shopper keeps the email-verified path.
     if (intent, action) == ("product_search", "get_recommendations"):
         intent = "customer_account"
-    # Listing orders is login-only: an email alone is not proof of identity, so guests
-    # get the "please log in" reply instead of an email-verified list.
-    if (intent, action) == ("order_tracking", "list_recent_orders"):
+    if (intent, action) == ("customer_account", "get_my_orders") and not customer_id:
+        intent, action = "order_tracking", "list_recent_orders"
+    if customer_id and (intent, action) == ("order_tracking", "list_recent_orders"):
         intent, action = "customer_account", "get_my_orders"
     if customer_id and (intent, action) == ("order_tracking", "track_order") and not (entities.get("order_number") or entities.get("order_id")):
         intent, action = "customer_account", "get_my_orders"
 
     # "show my orders" / "recommend something for me" always mean these features, whatever the classifier guessed.
     if intent in ("fallback", "order_tracking", "product_search") and not _ORDER_NO_RE.search(message) and _MY_ORDERS_RE.search(message):
-        intent, action = "customer_account", "get_my_orders"
+        intent, action = ("customer_account", "get_my_orders") if customer_id else ("order_tracking", "list_recent_orders")
     elif intent in ("fallback", "product_search") and _RECOMMEND_RE.search(message) and not any(
             entities.get(k) not in (None, "", []) for k in ("query", "category", "color", "price_min", "price_max")):
         intent, action = "customer_account", "get_recommendations"
@@ -891,7 +912,6 @@ async def _chat_impl(req: ChatRequest):
         return {"status": "confirmation_required", "reply": confirm_reply, "language": language}
 
     try:
-        entities["visitor_id"] = req.visitor_id
         result = await _execute_and_reply(store, intent, action, entities, language, message, req.session_id, customer_id=customer_id)
         _arm_verification_if_needed(key, intent, action, entities, language, result)
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
@@ -962,7 +982,7 @@ async def customer_session(request: Request):
         # Refresh the lightweight purchase summary at most once per hour.
         stale=(int(profile.get("synced_at") or 0) + 3600) < int(time.time())
         if stale or not profile.get("purchased_product_ids"):
-            order_data=await shopify_actions.get_customer_orders(store,customer_id,first=50,max_orders=50)
+            order_data=await shopify_actions.get_customer_orders(store,customer_id,first=50)
             if not order_data.get("error"): fields["purchased_product_ids"]=order_data.get("purchased_product_ids") or []
             names=[]; variants=[]
             for order in (order_data.get("active_orders") or [])+(order_data.get("past_orders") or []):
@@ -974,8 +994,6 @@ async def customer_session(request: Request):
         await customer_profiles.save_profile(shop,customer_id,fields)
         profile={**profile,**fields}
     return {"authenticated":True,"customer_id":str(customer_id),"customer_token":token,"first_name":(customer or {}).get("firstName") or profile.get("first_name") or ""}
-
-
 
 
 @router.get("/widget-config")
@@ -1676,58 +1694,15 @@ WIDGET_JS = r"""
       btn.textContent = "Add to cart";
       btn.addEventListener("click", function (e) {
         e.stopPropagation();
-        try {
-          var payload = {
-            shop: SHOP,
-            visitor_id: VISITOR_ID,
-            session_id: SESSION_ID,
-            event_type: "cart_add",
-            product_id: p.product_id || p.id || "",
-            product_name: p.name || "",
-            category: p.category || "",
-            sub_category: p.sub_category || "",
-            price: p.price || null,
-            customer_token: customerToken
-          };
-          fetch(ORIGIN + "/track-activity", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          }).catch(function () {});
-        } catch (err) {}
         cartAdd(p.id, 1, btn);
       });
       card.appendChild(img); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
-      card.addEventListener("click", function () {
-        try {
-          var payload = {
-            shop: SHOP,
-            visitor_id: VISITOR_ID,
-            session_id: SESSION_ID,
-            event_type: "product_click",
-            product_id: p.product_id || p.id || "",
-            product_name: p.name || "",
-            category: p.category || "",
-            sub_category: p.sub_category || "",
-            style: p.style || "",
-            price: p.price || null,
-            customer_token: customerToken
-          };
-          if (navigator.sendBeacon) {
-            navigator.sendBeacon(ORIGIN + "/track-activity", new Blob([JSON.stringify(payload)], { type: "application/json" }));
-          } else {
-            fetch(ORIGIN + "/track-activity", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-              keepalive: true
-            }).catch(function () {});
-          }
-        } catch (err) {}
-        if (p.url) {
-          window.open(p.url, "_blank", "noopener");
-        }
-      });
+      if (p.url) {
+        // Open the product page in a new tab (rather than navigating
+        // the current tab away) so the shopper doesn't lose their place
+        // in the chat/storefront while browsing.
+        card.addEventListener("click", function () { window.open(p.url, "_blank", "noopener"); });
+      }
       row.appendChild(card);
     });
     conversation.appendChild(row);
@@ -2055,12 +2030,12 @@ WIDGET_JS = r"""
     });
   }
 
-  function sendMessage(text, isRetry) {
+  function sendMessage(text) {
     text = (text || "").trim();
     if (!text) return;
     var nameUpdate = tryExtractNameFromMessage(text);
     tryExtractEmailFromMessage(text);
-    if (!isRetry) addBubble(text, "user");
+    addBubble(text, "user");
     input.value = "";
     micBtn.classList.remove("has-text");
 
@@ -2087,16 +2062,6 @@ WIDGET_JS = r"""
       .then(function (res) { return res.json(); })
       .then(function (data) {
         typingEl.remove();
-        if (data && data.session_expired && !isRetry) {
-          // Login token expired while the page stayed open: refresh it, then resend once.
-          customerToken = null;
-          try { sessionStorage.removeItem(CUSTOMER_TOKEN_KEY); } catch (e) {}
-          return loadCustomerSession().then(function () { sendMessage(text, true); });
-        }
-        if (data && data.session_expired) {
-          addBubble("Your login session has expired. Please refresh the page and try again.", "bot");
-          return;
-        }
         handleChatResponse(data);
       })
       .catch(function () {
@@ -2331,32 +2296,5 @@ WIDGET_JS = r"""
       micStatus.textContent = "Voice input is not supported in this browser.";
     });
   }
-
-  // Auto-track product page views if shopper is browsing a product
-  try {
-    if (window.location && window.location.pathname && window.location.pathname.indexOf("/products/") !== -1) {
-      var parts = window.location.pathname.split("/products/");
-      if (parts.length > 1) {
-        var pHandle = parts[1].split("/")[0].split("?")[0].replace(/\/+$/, "");
-        if (pHandle) {
-          var titleEl = document.querySelector("h1") || document.querySelector(".product-title") || document.querySelector(".product__title");
-          var pTitle = titleEl ? titleEl.textContent.trim() : pHandle;
-          fetch(ORIGIN + "/track-activity", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              shop: SHOP,
-              visitor_id: VISITOR_ID,
-              session_id: SESSION_ID,
-              event_type: "product_view",
-              product_id: pHandle,
-              product_name: pTitle,
-              customer_token: customerToken
-            })
-          }).catch(function () {});
-        }
-      }
-    }
-  } catch (e) {}
 })();
 """
