@@ -920,6 +920,7 @@ def setup_analytics_events_collection() -> dict:
         ("store", 64, True), ("event_type", 32, True), ("platform", 32, False),
         ("name", 255, False), ("category", 255, False), ("currency", 8, False),
         ("session_id", 100, False), ("visitor_id", 100, False), ("external_id", 100, False),
+        ("store_name", 255, False),  # readable store name (shop domain) so rows can be filtered by store in Appwrite
     ]
     for key, size, required in strings:
         step(f"attr:{key}", databases.create_string_attribute, DATABASE_ID, col, key, size, required)
@@ -938,6 +939,7 @@ def setup_analytics_events_collection() -> dict:
     step("index:store", databases.create_index, DATABASE_ID, col, "idx_store", "key", ["store"])
     step("index:store_type", databases.create_index, DATABASE_ID, col, "idx_store_type", "key", ["store", "event_type"])
     step("index:external", databases.create_index, DATABASE_ID, col, "idx_external", "key", ["store", "event_type", "external_id"])
+    step("index:store_name", databases.create_index, DATABASE_ID, col, "idx_store_name", "key", ["store_name"])
     return report
 
 
@@ -945,11 +947,62 @@ def _ev_clip(value, size: int) -> str:
     return str(value or "").strip()[:size]
 
 
+# ---- keep the table lean: only useful rows are stored ----
+_EV_ALLOWED_TYPES = {EVENT_SEARCH, EVENT_CART_ADD, EVENT_PURCHASE, EVENT_ORDER, EVENT_PRODUCT_VIEW, EVENT_CHAT}
+_EV_NEEDS_NAME = {EVENT_SEARCH, EVENT_CART_ADD, EVENT_PURCHASE, EVENT_PRODUCT_VIEW}
+_EV_REPEAT_WINDOW = 30  # seconds
+_EV_RECENT: dict = {}
+
+
+def _ev_clean_label(value, size: int = 100) -> str:
+    """Tidy a product / search label (extra spaces removed, 100 characters at
+    most). The text is saved as typed, including numbers. Returns "" only
+    when it is empty."""
+    return " ".join(str(value or "").split())[:size]
+
+
+def _ev_is_repeat(store_id: str, session_id: str, name: str) -> bool:
+    """True if this same shopper session already searched the same thing in
+    the last 30 seconds (a double-send or retry), so it isn't counted twice."""
+    if not session_id:
+        return False
+    now = _time.time()
+    key = (store_id, session_id, name.lower())
+    last = _EV_RECENT.get(key)
+    _EV_RECENT[key] = now
+    if len(_EV_RECENT) > 5000:
+        for k in [k for k, t in _EV_RECENT.items() if now - t > _EV_REPEAT_WINDOW]:
+            _EV_RECENT.pop(k, None)
+    return last is not None and now - last < _EV_REPEAT_WINDOW
+
+
 def record_event(store_id: str, event_type: str, name: str = "", value: float = 1, *,
                  platform: str = "shopify", category: str = "", currency: str = "",
-                 session_id: str = "", visitor_id: str = "", external_id: str = "") -> bool:
+                 session_id: str = "", visitor_id: str = "", external_id: str = "",
+                 store_name: str = "") -> bool:
     """Stores one analytics event. Returns True if written, False if it was
-    a duplicate (same external_id) or failed. Never raises."""
+    a duplicate (same external_id) or failed. Never raises.
+
+    `store_name` is a human-readable label (the shop domain) saved next to
+    the store id, so you can filter the table by store in the Appwrite
+    console. Isolation between stores does NOT depend on it — every read
+    filters on the `store` id.
+
+    Only useful rows are saved: unknown event types, searches / cart adds /
+    purchases without a product name and repeated identical searches from
+    one session within 30 seconds are skipped (returns False). Empty fields
+    are not stored. Search / product text is saved exactly as typed."""
+    event_type = _ev_clip(event_type, 32)
+    if not store_id or event_type not in _EV_ALLOWED_TYPES:
+        return False
+    if event_type == EVENT_CHAT:
+        name = ""  # which intent was used isn't charted anywhere, so it isn't stored
+    else:
+        name = _ev_clean_label(name)
+        if event_type in _EV_NEEDS_NAME and not name:
+            return False
+    if event_type == EVENT_SEARCH and _ev_is_repeat(store_id, _ev_clip(session_id, 100), name):
+        return False
     try:
         if external_id:
             dup = databases.list_documents(
@@ -963,21 +1016,30 @@ def record_event(store_id: str, event_type: str, name: str = "", value: float = 
             amount = float(value)
         except (TypeError, ValueError):
             amount = 1.0
-        databases.create_document(
-            DATABASE_ID, ANALYTICS_EVENTS_COLLECTION, ID.unique(),
-            data={
-                "store": store_id,
-                "event_type": _ev_clip(event_type, 32),
-                "platform": _ev_clip(platform, 32),
-                "name": _ev_clip(name, 255),
-                "category": _ev_clip(category, 255),
-                "value": amount,
-                "currency": _ev_clip(currency, 8).upper(),
-                "session_id": _ev_clip(session_id, 100),
-                "visitor_id": _ev_clip(visitor_id, 100),
-                "external_id": _ev_clip(external_id, 100),
-            },
-        )
+        data = {"store": store_id, "event_type": event_type, "value": amount}
+        for key, val in (
+            ("platform", _ev_clip(platform, 32)),
+            ("name", name),
+            ("category", _ev_clean_label(category)),
+            ("currency", _ev_clip(currency, 8).upper()),
+            ("session_id", _ev_clip(session_id, 100)),
+            ("visitor_id", _ev_clip(visitor_id, 100)),
+            ("external_id", _ev_clip(external_id, 100)),
+            ("store_name", _ev_clip(store_name, 255)),
+        ):
+            if val:  # empty fields are not stored at all
+                data[key] = val
+        try:
+            databases.create_document(DATABASE_ID, ANALYTICS_EVENTS_COLLECTION, ID.unique(), data=data)
+        except AppwriteException as e:
+            # The `store_name` column may not exist yet (it is added by the
+            # table setup on the first start after this update). Don't lose
+            # the event: save it without the label.
+            if "store_name" in data and "store_name" in str(getattr(e, "message", e)):
+                data.pop("store_name")
+                databases.create_document(DATABASE_ID, ANALYTICS_EVENTS_COLLECTION, ID.unique(), data=data)
+            else:
+                raise
         return True
     except Exception as e:  # noqa: BLE001 — analytics must never break the caller
         print(f"repository_appwrite: record_event failed: {e!r}")
