@@ -21,6 +21,7 @@ import shopify_auth
 import webhooks
 import dashboard_nicegui  # noqa: F401 — importing this registers all @ui.page routes below
 import chatbot_widget  # NOTE: still needs migrating off SQLAlchemy — see below
+import activity_tracker
 
 app = FastAPI(title="Shopify Chatbot Plugin")
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +63,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(shopify_auth.router)
 app.include_router(webhooks.router)
 app.include_router(chatbot_widget.router)  # add back once migrated
+app.include_router(activity_tracker.router)
 
 # --------------------------------------------------------------------
 # NiceGUI mount — must come LAST among routers/mounts above.

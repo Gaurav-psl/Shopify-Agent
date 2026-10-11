@@ -59,7 +59,6 @@ from reply_generator import generate_reply
 import shopify_actions
 import customer_profiles
 import semantic
-import activity_tracker
 
 router = APIRouter(tags=["chatbot-widget"])
 
@@ -182,18 +181,6 @@ class ConfirmRequest(BaseModel):
     visitor_id: str | None = None  # >>> ADDED (analytics)
 
 
-class TrackActivityRequest(BaseModel):
-    shop: str
-    visitor_id: str
-    session_id: str | None = ""
-    event_type: str = "product_click"
-    product_id: str | None = ""
-    product_name: str | None = ""
-    category: str | None = ""
-    sub_category: str | None = ""
-    style: str | None = ""
-    price: float | None = None
-    customer_token: str | None = None
 
 
 _CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
@@ -985,33 +972,6 @@ async def customer_session(request: Request):
     return {"authenticated":True,"customer_id":str(customer_id),"customer_token":token,"first_name":(customer or {}).get("firstName") or profile.get("first_name") or ""}
 
 
-@router.post("/track-activity")
-async def track_activity_endpoint(req: TrackActivityRequest):
-    customer_id = None
-    if req.customer_token:
-        customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
-
-    return activity_tracker.track_activity(
-        shop=req.shop,
-        visitor_id=req.visitor_id,
-        session_id=req.session_id or "",
-        event_type=req.event_type or "product_click",
-        product_id=req.product_id or "",
-        product_name=req.product_name or "",
-        category=req.category or "",
-        sub_category=req.sub_category or "",
-        style=req.style or "",
-        price=req.price,
-        customer_id=customer_id,
-    )
-
-
-@router.get("/user-activity")
-async def user_activity_endpoint(shop: str, visitor_id: str, customer_token: str | None = None):
-    customer_id = None
-    if customer_token:
-        customer_id = customer_profiles.read_session_token(customer_token, shop)
-    return activity_tracker.get_user_activity_summary(shop, visitor_id, customer_id)
 
 
 @router.get("/widget-config")

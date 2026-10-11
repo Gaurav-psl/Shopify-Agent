@@ -18,6 +18,26 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(tags=["activity-tracking"])
+
+
+class TrackActivityRequest(BaseModel):
+    shop: str
+    visitor_id: str
+    session_id: str | None = ""
+    event_type: str = "product_click"
+    product_id: str | None = ""
+    product_name: str | None = ""
+    category: str | None = ""
+    sub_category: str | None = ""
+    style: str | None = ""
+    price: float | None = None
+    customer_token: str | None = None
+
+
 # Background executor for persistent logging to Appwrite
 _BG_POOL = ThreadPoolExecutor(max_workers=3)
 
@@ -191,3 +211,35 @@ def clear_cache_for_testing() -> None:
     """Helper to reset in-memory caches between unit tests."""
     _ACTIVITY_STORE.clear()
     _STORE_TRENDING_CLICKS.clear()
+
+
+@router.post("/track-activity")
+async def track_activity_endpoint(req: TrackActivityRequest):
+    import customer_profiles
+    customer_id = None
+    if req.customer_token:
+        customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+
+    return track_activity(
+        shop=req.shop,
+        visitor_id=req.visitor_id,
+        session_id=req.session_id or "",
+        event_type=req.event_type or "product_click",
+        product_id=req.product_id or "",
+        product_name=req.product_name or "",
+        category=req.category or "",
+        sub_category=req.sub_category or "",
+        style=req.style or "",
+        price=req.price,
+        customer_id=customer_id,
+    )
+
+
+@router.get("/user-activity")
+async def user_activity_endpoint(shop: str, visitor_id: str, customer_token: str | None = None):
+    import customer_profiles
+    customer_id = None
+    if customer_token:
+        customer_id = customer_profiles.read_session_token(customer_token, shop)
+    return get_user_activity_summary(shop, visitor_id, customer_id)
+
