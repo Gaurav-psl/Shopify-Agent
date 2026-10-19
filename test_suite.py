@@ -680,15 +680,42 @@ async def run_tests():
         return SimpleNamespace(status_code=404, json=lambda: {}, text="")
     shopify_actions._get = mock_vis_get
 
-    vis_res = await shopify_actions.dispatch(
+    # 1. Direct / exact match
+    vis_exact = await shopify_actions.dispatch(
         "visual_search", "search_by_image", store,
-        {"category": "sneakers", "color": "white", "style": "casual"},
+        {"exact_product_name": "White Minimalist Leather Sneakers"},
         session_id=session_id
     )
-    assert vis_res["status"] == "visual_search_success"
-    assert len(vis_res["results"]) > 0
-    assert any("Sneakers" in r["name"] for r in vis_res["results"])
-    print(f"PASS: Visual search identified {len(vis_res['results'])} visually matching catalog styles.")
+    assert vis_exact["status"] == "exact_match_found", f"Expected exact_match_found, got {vis_exact.get('status')}"
+    assert vis_exact["direct_match"] is True
+    assert len(vis_exact["results"]) == 1
+    assert "White Minimalist Leather Sneakers" in vis_exact["results"][0]["name"]
+    print("PASS: Exact match correctly identified catalog item directly.")
+
+    # 2. Exact item unavailable -> embedding model recommends similar products
+    vis_similar = await shopify_actions.dispatch(
+        "visual_search", "search_by_image", store,
+        {"category": "running shoes", "color": "orange", "style": "athletic runner"},
+        session_id=session_id
+    )
+    assert vis_similar["status"] == "similar_products_found", f"Expected similar_products_found, got {vis_similar.get('status')}"
+    assert vis_similar["direct_match"] is False
+    assert len(vis_similar["results"]) > 0
+    assert any("Running Shoes" in r["name"] for r in vis_similar["results"])
+    assert "not currently available" in vis_similar["message"] or "similar products" in vis_similar["message"]
+    print(f"PASS: Exact item unavailable -> embedding model recommended {len(vis_similar['results'])} similar styles.")
+
+    # 3. Completely unrelated item -> directly informs user no such product is available
+    vis_none = await shopify_actions.dispatch(
+        "visual_search", "search_by_image", store,
+        {"category": "diamond necklace", "color": "gold", "style": "luxury jewelry"},
+        session_id=session_id
+    )
+    assert vis_none["status"] == "no_products_available", f"Expected no_products_available, got {vis_none.get('status')}"
+    assert vis_none["direct_match"] is False
+    assert len(vis_none["results"]) == 0
+    assert "no similar products are available at this store" in vis_none["message"].lower() or "not available" in vis_none["message"].lower()
+    print("PASS: Unmatched item with no catalog similarity directly informed shopper that no such product is available.")
 
     print("\n==================================================")
     print("  TEST 15: GOAL-BASED MULTI-ITEM CART BUILDER")

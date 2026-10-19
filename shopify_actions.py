@@ -58,6 +58,7 @@ import time
 from datetime import datetime
 import httpx
 import difflib
+import semantic
 
 import tracking_provider
 
@@ -2070,32 +2071,79 @@ async def list_my_alerts(store, entities: dict, session_id: str, customer_id: st
 # ==========================================================================
 # VISUAL SEARCH (Multimodal Product Discovery)
 # ==========================================================================
+def _product_card_from_raw(p: dict, store) -> dict:
+    best_variant = (p.get("variants") or [{}])[0]
+    price = float(best_variant.get("price", 0) or 0)
+    img_src = (p.get("image") or {}).get("src", "")
+    if not img_src and p.get("images") and isinstance(p["images"], list) and len(p["images"]) > 0:
+        first_img = p["images"][0]
+        img_src = first_img.get("src", "") if isinstance(first_img, dict) else str(first_img)
+    return {
+        "id": str(best_variant.get("id")),
+        "name": p.get("title", "Unnamed product"),
+        "price": price,
+        "image": img_src,
+        "handle": p.get("handle", ""),
+        "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+    }
+
+
 async def search_by_image(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
-    """Finds visually matching catalog products based on an uploaded image or visual style query."""
+    """Matches product from an uploaded image directly, or recommends similar products using the embedding model."""
     image_data = entities.get("image_data") or ""
     image_query = (entities.get("image_query") or entities.get("query") or "").strip()
     category = (entities.get("category") or "").strip()
     color = (entities.get("color") or "").strip()
     style = (entities.get("style") or "").strip()
 
-    search_keywords = []
-    detected_attributes = {}
+    # 1. Fetch active products from store catalog
+    resp = await _get(store, "products.json", {"status": "active", "limit": 100})
+    if resp.status_code != 200:
+        return {
+            "status": "lookup_failed",
+            "direct_match": False,
+            "results": [],
+            "matched_count": 0,
+            "message": "Sorry, I couldn't access the store catalog right now. Please try again shortly.",
+        }
 
+    all_products = resp.json().get("products", [])
+    if not all_products:
+        return {
+            "status": "no_products_available",
+            "direct_match": False,
+            "results": [],
+            "matched_count": 0,
+            "message": "No such product is available at this store.",
+        }
+
+    detected = {}
+    exact_store_product = None
+
+    # 2. Vision LLM analysis if image_data is provided
     if image_data and image_data.startswith("data:image"):
-        # Visual analysis with vision LLM if available
         try:
+            catalog_summary = [f"ID {p.get('id')}: {p.get('title')}" for p in all_products[:30]]
+            catalog_context = "\n".join(catalog_summary) if catalog_summary else "No products listed"
             prompt = (
-                "Analyze this fashion / product image for an eCommerce search. "
-                "Respond ONLY with a JSON object: "
-                '{"category": "category name (e.g. sneakers, maxi dress, hoodie, watch)", '
-                '"color": "main colors (e.g. navy blue, white, emerald)", '
-                '"style": "style attributes (e.g. casual, athletic, floral, streetwear)", '
-                '"search_query": "3-5 word concise search query for product catalog"}'
+                "You are an eCommerce visual product matcher. Analyze this uploaded product image.\n"
+                f"Current Store Catalog Products:\n{catalog_context}\n\n"
+                "Respond ONLY with a JSON object:\n"
+                "{\n"
+                '  "is_exact_match": true/false (true ONLY if the photo depicts the EXACT same product listed above),\n'
+                '  "exact_product_id": "exact store product ID if is_exact_match is true, else null",\n'
+                '  "exact_product_name": "Specific recognizable product title or model if identifiable, else null",\n'
+                '  "category": "specific product category (e.g. sneakers, running shoes, midi dress, watch, hoodie)",\n'
+                '  "color": "primary colors (e.g. white, navy blue, emerald)",\n'
+                '  "style": "aesthetic descriptors (e.g. minimalist leather, athletic mesh, casual, formal)",\n'
+                '  "visual_description": "1-2 descriptive sentences detailing the visual cut, silhouette, patterns, and design of the item",\n'
+                '  "search_query": "3-5 word concise search term for finding similar products"\n'
+                "}"
             )
             llm_res = llm_selector.create_chat_completion(
-                temperature=0.2,
+                temperature=0.1,
                 messages=[
-                    {"role": "system", "content": "You are a multimodal product recognition system. Output strictly JSON."},
+                    {"role": "system", "content": "You are a precise multimodal eCommerce vision matcher. Output strictly JSON."},
                     {"role": "user", "content": [
                         {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": image_data}}
@@ -2105,43 +2153,115 @@ async def search_by_image(store, entities: dict, session_id: str, customer_id: s
             text_content = llm_res.choices[0].message.content
             m = re.search(r"\{.*?\}", text_content, re.DOTALL)
             if m:
-                detected_attributes = json.loads(m.group(0))
-                if detected_attributes.get("search_query"):
-                    search_keywords.append(detected_attributes["search_query"])
-                if detected_attributes.get("category"):
-                    category = detected_attributes["category"]
-                if detected_attributes.get("color"):
-                    color = detected_attributes["color"]
-                if detected_attributes.get("style"):
-                    style = detected_attributes["style"]
+                detected = json.loads(m.group(0))
+                if detected.get("category"):
+                    category = detected["category"]
+                if detected.get("color"):
+                    color = detected["color"]
+                if detected.get("style"):
+                    style = detected["style"]
+                if detected.get("is_exact_match") and detected.get("exact_product_id"):
+                    exact_id = str(detected["exact_product_id"]).strip()
+                    for p in all_products:
+                        if str(p.get("id")) == exact_id:
+                            exact_store_product = p
+                            break
         except Exception as e:
             print(f"[visual search] vision LLM analysis skipped/failed: {e!r}")
 
-    if not search_keywords:
-        parts = [p for p in [color, style, category, image_query] if p]
-        if parts:
-            search_keywords.append(" ".join(parts))
-        else:
-            search_keywords.append("featured")
+    # 3. Direct match detection
+    # If not identified by exact ID from vision, check if exact product title or model matches
+    exact_name = (detected.get("exact_product_name") or entities.get("exact_product_name") or "").strip()
+    if not exact_store_product and exact_name:
+        for p in all_products:
+            p_title = (p.get("title") or "").strip().lower()
+            if p_title == exact_name.lower():
+                exact_store_product = p
+                break
 
-    query_str = search_keywords[0] if search_keywords else "featured"
-    search_res = await search_products(store, {"query": query_str, "color": color}, session_id)
-    matched = search_res.get("results") or []
+    # Check if image_query or category/color/style query directly targets an exact product
+    if not exact_store_product:
+        candidate_query = f"{color} {style} {category}".strip() or image_query
+        if candidate_query:
+            clean_q = _clean_search_tokens(candidate_query)
+            for p in all_products:
+                clean_title = _clean_search_tokens(p.get("title") or "")
+                # If all significant query tokens are matched in the product title with high specificity
+                if clean_q and len(clean_q) >= 2 and set(clean_q).issubset(set(clean_title)):
+                    score = _score_product_match(p, clean_q)
+                    if score >= 3.5:
+                        exact_store_product = p
+                        break
 
-    # If specific query produced no results, fallback to general catalog search
-    if not matched:
-        fallback_res = await search_products(store, {"query": category or "all"}, session_id)
-        matched = fallback_res.get("results") or []
+    # If direct match is available:
+    if exact_store_product:
+        card = _product_card_from_raw(exact_store_product, store)
+        card["is_direct_match"] = True
+        card["match_badge"] = "🎯 Exact Match"
+        p_name = card.get("name") or "Product"
+        p_price = f" (${card['price']:.2f})" if card.get("price") is not None else ""
+        return {
+            "status": "exact_match_found",
+            "direct_match": True,
+            "query_description": p_name,
+            "results": [card],
+            "matched_count": 1,
+            "message": f"Found an exact match for your photo: {p_name}{p_price}!",
+        }
 
-    description_text = f"{color} {style} {category}".strip() or query_str
+    # 4. Direct product is NOT available -> find similar products using the EMBEDDING MODEL
+    vis_desc = detected.get("visual_description") or ""
+    search_q = detected.get("search_query") or ""
+    query_parts = [p for p in [color, style, category, image_query, vis_desc, search_q] if p]
+    visual_semantic_query = ". ".join(query_parts) if query_parts else (image_query or "product")
 
-    return {
-        "status": "visual_search_success",
-        "query_description": description_text,
-        "results": matched,
-        "matched_count": len(matched),
-        "message": f"I analyzed your photo! Here are the closest matching styles from our store:" if matched else "I analyzed your photo, but couldn't find an exact match in our store right now. Here are some popular alternatives:",
-    }
+    similar_products = []
+    try:
+        ranked = await semantic.rank_products(store.shop_domain, all_products, visual_semantic_query, limit=4)
+        if ranked is not None:
+            similar_products = ranked
+    except Exception as e:
+        print(f"[visual search] semantic embedding ranking error: {e!r}")
+
+    # Fallback only if semantic embedding was unavailable (None)
+    if not similar_products and not semantic.enabled():
+        q_tokens = _clean_search_tokens(visual_semantic_query)
+        scored = []
+        for p in all_products:
+            score = _score_product_match(p, q_tokens) if q_tokens else 0.0
+            if score >= 1.5:
+                scored.append((score, p))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        similar_products = [x[1] for x in scored[:4]]
+
+    # 5. Similar products found vs No similar products available
+    if similar_products:
+        cards = []
+        for p in similar_products:
+            c = _product_card_from_raw(p, store)
+            c["is_direct_match"] = False
+            c["match_badge"] = "✨ Similar Style"
+            cards.append(c)
+
+        desc_short = f"{color} {style} {category}".strip() or image_query or "your photo"
+        return {
+            "status": "similar_products_found",
+            "direct_match": False,
+            "query_description": desc_short,
+            "results": cards,
+            "matched_count": len(cards),
+            "message": "That exact product isn't available in our store, but here are some similar products you might like based on your photo:",
+        }
+    else:
+        # User requirement: "and also if no similar product is availabe directly tell the user that no such product is avaiable at this store"
+        return {
+            "status": "no_products_available",
+            "direct_match": False,
+            "query_description": visual_semantic_query,
+            "results": [],
+            "matched_count": 0,
+            "message": "That exact product is not available, and no similar products are available at this store.",
+        }
 
 
 # ==========================================================================

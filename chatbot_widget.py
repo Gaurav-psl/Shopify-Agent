@@ -640,7 +640,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 except Exception as e:
                     print(f"chatbot_widget: fallback products fetch failed: {e!r}")
 
-    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify"} and isinstance(data, dict) else None
+    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify", "search_by_image"} and isinstance(data, dict) else None
     if products and isinstance(products, list) and len(products) > 0:
         first_prod = products[0]
         if isinstance(first_prod, dict) and first_prod.get("name"):
@@ -1753,6 +1753,9 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .product-card img { width:100%; height:75px; object-fit:cover; border-radius:6px; background:#f2f2f2; }",
     "#ai-chat-widget-root .product-card .p-name { font-size:10.5px; font-weight:600; color:#222; max-height:28px; overflow:hidden; }",
     "#ai-chat-widget-root .product-card .p-price { font-size:11px; font-weight:700; color:#2b2b2b; }",
+    "#ai-chat-widget-root .product-card .p-badge { font-size:8.5px; font-weight:700; padding:1px 6px; border-radius:999px; align-self:flex-start; margin-bottom:2px; }",
+    "#ai-chat-widget-root .product-card .p-badge.exact { background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; }",
+    "#ai-chat-widget-root .product-card .p-badge.similar { background:#f5f3ff; color:#7c3aed; border:1px solid #ddd6fe; }",
     "#ai-chat-widget-root .product-card button { margin-top:2px; border:none; background:#2b2b2b; color:#fff; font-size:10px; padding:4px 0; border-radius:999px; cursor:pointer; }",
     "#ai-chat-widget-root .product-card button:disabled { background:#9c9c9c; }",
 
@@ -2309,6 +2312,12 @@ WIDGET_JS = r"""
         e.stopPropagation();
         cartAdd(p.id, 1, btn);
       });
+      if (p.match_badge) {
+        var badge = document.createElement("div");
+        badge.className = "p-badge " + (p.is_direct_match ? "exact" : "similar");
+        badge.textContent = p.match_badge;
+        card.appendChild(badge);
+      }
       card.appendChild(img); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
       row.appendChild(card);
     });

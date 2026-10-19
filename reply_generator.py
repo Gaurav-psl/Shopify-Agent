@@ -207,8 +207,11 @@ def generate_reply(
         )
     elif action_name == "search_by_image":
         extra_clause = (
-            " Enthusiastically introduce the matching products found for the shopper's uploaded photo, "
-            "highlighting their styles, colors, and prices."
+            " For visual search: if direct_match is true, enthusiastically celebrate finding the exact product from the shopper's photo, "
+            "mention its name and price, and invite them to add it to their cart. "
+            "If direct_match is false but results are available, explicitly tell the user that the exact product from their photo is not available in our store, "
+            "and warmly introduce the similar products found using the embedding model. "
+            "If results are empty or status is 'no_products_available', directly and clearly tell the user that the product in their photo is not available and no similar products are available at this store."
         )
     elif action_name == "build_goal_bundle":
         extra_clause = (

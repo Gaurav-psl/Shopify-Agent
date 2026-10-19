@@ -62,7 +62,32 @@ PRODUCT_MIN_SCORE = float(os.environ.get("SEMANTIC_PRODUCT_MIN_SCORE", "0.30"))
 
 
 def enabled() -> bool:
-    return np is not None and (bool(BASE_URL and API_MODEL) or bool(LOCAL_MODEL))
+    return np is not None
+
+
+def _fallback_embed(texts: list[str], dim: int = 256):
+    """Normalized subword n-gram & token hashing vectorizer for semantic matching."""
+    rows = []
+    for t in texts:
+        vec = np.zeros(dim, dtype=np.float32)
+        tokens = re.findall(r"\b\w+\b", (t or "").lower())
+        for tok in tokens:
+            h = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16)
+            idx = h % dim
+            sign = 1.0 if (h >> 8) & 1 else -1.0
+            vec[idx] += sign * 1.5
+            for n in (3, 4):
+                for i in range(len(tok) - n + 1):
+                    sub = tok[i:i + n]
+                    h_sub = int(hashlib.md5(sub.encode("utf-8")).hexdigest(), 16)
+                    sub_idx = h_sub % dim
+                    sub_sign = 1.0 if (h_sub >> 8) & 1 else -1.0
+                    vec[sub_idx] += sub_sign * 0.5
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec /= norm
+        rows.append(vec)
+    return np.asarray(rows, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------
@@ -101,9 +126,11 @@ async def embed(texts: list[str]):
                     data = sorted(resp.json()["data"], key=lambda r: r["index"])
                     rows.extend(r["embedding"] for r in data)
             arr = np.asarray(rows, dtype="float32")
-        else:
+        elif LOCAL_MODEL:
             model = await asyncio.to_thread(_load_local)
             arr = await asyncio.to_thread(lambda: np.asarray(model.encode(texts, normalize_embeddings=True), dtype="float32"))
+        else:
+            arr = _fallback_embed(texts)
         norms = np.linalg.norm(arr, axis=1, keepdims=True)
         norms[norms == 0] = 1
         return arr / norms
