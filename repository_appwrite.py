@@ -75,27 +75,39 @@ from appwrite_client import (
 
 
 def _find_store_doc(shop_domain: str):
-    result = databases.list_documents(
-        DATABASE_ID, STORES_COLLECTION,
-        queries=[Query.equal("shop_domain", shop_domain)],
-    )
-    docs = _normalize_list(result)["documents"]
-    return docs[0] if docs else None
+    if not DATABASE_ID or not shop_domain:
+        return None
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, STORES_COLLECTION,
+            queries=[Query.equal("shop_domain", shop_domain)],
+        )
+        docs = _normalize_list(result)["documents"]
+        return docs[0] if docs else None
+    except Exception as e:
+        print(f"repository_appwrite: _find_store_doc({shop_domain!r}) failed: {e!r}")
+        return None
 
 
 def get_store(shop_domain: str) -> dict | None:
     """Returns the raw store document (not just the token), for callers
     that need more than the access token — e.g. checking is_new_store."""
-    doc = _find_store_doc(shop_domain)
-    if doc and doc.get("uninstalled"):
+    try:
+        doc = _find_store_doc(shop_domain)
+        if doc and doc.get("uninstalled"):
+            return None
+        return doc
+    except Exception as e:
+        print(f"repository_appwrite: get_store({shop_domain!r}) failed: {e!r}")
         return None
-    return doc
 
 
 def get_store_by_id(store_id: str) -> dict | None:
+    if not DATABASE_ID or not store_id:
+        return None
     try:
         return databases.get_document(DATABASE_ID, STORES_COLLECTION, store_id)
-    except AppwriteException:
+    except Exception:
         return None
 
 
@@ -333,26 +345,32 @@ def get_top_features_used(store_id: str, limit: int = 8) -> list[tuple[str, int]
 # --- Dashboard users (store owner's login) ---
 
 def has_dashboard_user(store_id: str) -> bool:
-    result = databases.list_documents(
-        DATABASE_ID, DASHBOARD_USERS_COLLECTION,
-        queries=[Query.equal("store", store_id)],
-    )
-    return len(result["documents"]) > 0
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+            queries=[Query.equal("store", store_id)],
+        )
+        return len(result.get("documents", [])) > 0
+    except Exception:
+        return False
 
 
 def get_dashboard_user_by_email(email: str) -> dict | None:
-    normalized = (email or "").strip().lower()
-    result = databases.list_documents(
-        DATABASE_ID, DASHBOARD_USERS_COLLECTION,
-        queries=[Query.equal("email", normalized)],
-    )
-    return result["documents"][0] if result["documents"] else None
+    try:
+        normalized = (email or "").strip().lower()
+        result = databases.list_documents(
+            DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+            queries=[Query.equal("email", normalized)],
+        )
+        return result["documents"][0] if result.get("documents") else None
+    except Exception:
+        return None
 
 
 def get_dashboard_user_by_id(user_id: str) -> dict | None:
     try:
         return databases.get_document(DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id)
-    except AppwriteException:
+    except Exception:
         return None
 
 
@@ -367,38 +385,46 @@ def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict
 # --- Agent customization (name, welcome/title, instructions, status, icon, theme, position) ---
 
 def get_customization(store_id: str) -> dict | None:
-    result = databases.list_documents(
-        DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
-        queries=[Query.equal("store", store_id)],
-    )
-    return result["documents"][0] if result["documents"] else None
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
+            queries=[Query.equal("store", store_id)],
+        )
+        return result["documents"][0] if result.get("documents") else None
+    except Exception:
+        return None
 
 
 def ensure_customization(store_id: str) -> dict:
     """Creates a default customization row if one doesn't exist yet —
     called right after install, same as your old code did in the same
     db.commit() as creating the Store row."""
+    default_cust = {
+        "$id": f"cust_{store_id}",
+        "store": store_id,
+        "agent_name": "AI Assistant",
+        "agent_title": "How can I help you today?",
+        "theme_color": "#2b2b2b",
+        "icon_type": "preset",
+        "instructions": (
+            "You are a helpful AI shopping assistant for this store. "
+            "Be friendly, helpful and concise. Always try to provide "
+            "accurate information about products, orders, shipping, "
+            "returns and store policies."
+        ),
+        "status": "active",
+        "widget_position": "bottom-right",
+    }
     existing = get_customization(store_id)
     if existing:
         return existing
-    return databases.create_document(
-        DATABASE_ID, CUSTOMIZATIONS_COLLECTION, ID.unique(),
-        data={
-            "store": store_id,
-            "agent_name": "AI Assistant",
-            "agent_title": "How can I help you today?",
-            "theme_color": "#2b2b2b",
-            "icon_type": "preset",
-            "instructions": (
-                "You are a helpful AI shopping assistant for this store. "
-                "Be friendly, helpful and concise. Always try to provide "
-                "accurate information about products, orders, shipping, "
-                "returns and store policies."
-            ),
-            "status": "active",
-            "widget_position": "bottom-right",
-        },
-    )
+    try:
+        return databases.create_document(
+            DATABASE_ID, CUSTOMIZATIONS_COLLECTION, ID.unique(),
+            data={k: v for k, v in default_cust.items() if k != "$id"},
+        )
+    except Exception:
+        return default_cust
 
 
 def update_customization(store_id: str, **fields) -> dict:
@@ -460,21 +486,27 @@ _DEFAULT_FEATURES = {
 
 
 def get_features(store_id: str) -> dict | None:
-    result = databases.list_documents(
-        DATABASE_ID, FEATURES_COLLECTION,
-        queries=[Query.equal("store", store_id)],
-    )
-    return result["documents"][0] if result["documents"] else None
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, FEATURES_COLLECTION,
+            queries=[Query.equal("store", store_id)],
+        )
+        return result["documents"][0] if result.get("documents") else None
+    except Exception:
+        return None
 
 
 def ensure_features(store_id: str) -> dict:
     existing = get_features(store_id)
     if existing:
         return existing
-    return databases.create_document(
-        DATABASE_ID, FEATURES_COLLECTION, ID.unique(),
-        data={"store": store_id, **_DEFAULT_FEATURES},
-    )
+    try:
+        return databases.create_document(
+            DATABASE_ID, FEATURES_COLLECTION, ID.unique(),
+            data={"store": store_id, **_DEFAULT_FEATURES},
+        )
+    except Exception:
+        return {"$id": f"feat_{store_id}", "store": store_id, **_DEFAULT_FEATURES}
 
 
 def update_features(store_id: str, **fields) -> dict:
@@ -495,21 +527,27 @@ def is_feature_enabled(store_id: str, feature_name: str) -> bool:
 # --- Store info (business name, support email, timezone) ---
 
 def get_store_info(store_id: str) -> dict | None:
-    result = databases.list_documents(
-        DATABASE_ID, STORE_INFO_COLLECTION,
-        queries=[Query.equal("store", store_id)],
-    )
-    return result["documents"][0] if result["documents"] else None
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, STORE_INFO_COLLECTION,
+            queries=[Query.equal("store", store_id)],
+        )
+        return result["documents"][0] if result.get("documents") else None
+    except Exception:
+        return None
 
 
 def ensure_store_info(store_id: str) -> dict:
     existing = get_store_info(store_id)
     if existing:
         return existing
-    return databases.create_document(
-        DATABASE_ID, STORE_INFO_COLLECTION, ID.unique(),
-        data={"store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"},
-    )
+    try:
+        return databases.create_document(
+            DATABASE_ID, STORE_INFO_COLLECTION, ID.unique(),
+            data={"store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"},
+        )
+    except Exception:
+        return {"$id": f"info_{store_id}", "store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"}
 
 
 def update_store_info(store_id: str, **fields) -> dict:
@@ -520,11 +558,14 @@ def update_store_info(store_id: str, **fields) -> dict:
 # --- Knowledge base / FAQs ---
 
 def list_faqs(store_id: str) -> list[dict]:
-    result = databases.list_documents(
-        DATABASE_ID, FAQS_COLLECTION,
-        queries=[Query.equal("store", store_id), Query.order_asc("$createdAt")],
-    )
-    return result["documents"]
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, FAQS_COLLECTION,
+            queries=[Query.equal("store", store_id), Query.order_asc("$createdAt")],
+        )
+        return result.get("documents", [])
+    except Exception:
+        return []
 
 
 def add_faq(store_id: str, question: str, answer: str) -> dict:

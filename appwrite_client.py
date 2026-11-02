@@ -13,6 +13,11 @@ Required environment variables (from your Appwrite Project Settings):
 """
 
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 class NormalizedDocument(dict):
     """Subclass of dict that allows both dict access (d['$id'], d['shop_domain'])
@@ -93,23 +98,57 @@ class DatabaseWrapper:
         self._target = target
 
     def list_documents(self, *args, **kwargs):
-        res = self._target.list_documents(*args, **kwargs)
-        return _normalize_list(res)
+        if not args or not args[0]:
+            return _normalize_list(None)
+        try:
+            res = self._target.list_documents(*args, **kwargs)
+            return _normalize_list(res)
+        except Exception as e:
+            print(f"appwrite_client: list_documents failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            return _normalize_list(None)
 
     def get_document(self, *args, **kwargs):
-        res = self._target.get_document(*args, **kwargs)
-        return _normalize_doc(res)
+        if not args or not args[0] or (len(args) > 2 and not args[2]):
+            return None
+        try:
+            res = self._target.get_document(*args, **kwargs)
+            return _normalize_doc(res)
+        except Exception as e:
+            print(f"appwrite_client: get_document failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            return None
 
     def create_document(self, *args, **kwargs):
-        res = self._target.create_document(*args, **kwargs)
-        return _normalize_doc(res)
+        if not args or not args[0]:
+            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
+            return _normalize_doc({"$id": "local_mock_id", **data})
+        try:
+            res = self._target.create_document(*args, **kwargs)
+            return _normalize_doc(res)
+        except Exception as e:
+            print(f"appwrite_client: create_document failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
+            return _normalize_doc({"$id": "local_mock_id", **data})
 
     def update_document(self, *args, **kwargs):
-        res = self._target.update_document(*args, **kwargs)
-        return _normalize_doc(res)
+        if not args or not args[0]:
+            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
+            return _normalize_doc({"$id": args[2] if len(args) > 2 else "local_mock_id", **data})
+        try:
+            res = self._target.update_document(*args, **kwargs)
+            return _normalize_doc(res)
+        except Exception as e:
+            print(f"appwrite_client: update_document failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
+            return _normalize_doc({"$id": args[2] if len(args) > 2 else "local_mock_id", **data})
 
     def delete_document(self, *args, **kwargs):
-        return self._target.delete_document(*args, **kwargs)
+        if not args or not args[0]:
+            return True
+        try:
+            return self._target.delete_document(*args, **kwargs)
+        except Exception as e:
+            print(f"appwrite_client: delete_document failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            return False
 
     def __getattr__(self, name):
         return getattr(self._target, name)

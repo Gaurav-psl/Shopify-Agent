@@ -28,7 +28,7 @@ import urllib.parse
 from types import SimpleNamespace
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import RedirectResponse, PlainTextResponse
+from fastapi.responses import RedirectResponse, PlainTextResponse, HTMLResponse
 
 import repository_appwrite as repo
 import shopify_actions
@@ -112,12 +112,23 @@ async def app_entry(request: Request):
                 "SHOPIFY_API_KEY_set": bool(SHOPIFY_API_KEY),
                 "SHOPIFY_API_SECRET_set": bool(SHOPIFY_API_SECRET),
                 "APP_URL_set": bool(APP_URL),
+                "APPWRITE_DATABASE_ID_set": bool(repo.DATABASE_ID),
+                "APPWRITE_PROJECT_ID_set": bool(repo.APPWRITE_PROJECT_ID),
             },
         }
 
-    store = repo.get_store(shop)
+    try:
+        store = repo.get_store(shop)
+    except Exception as e:
+        print(f"shopify_auth: store lookup failed for {shop}: {e!r}")
+        store = None
+
     if store and store.get("access_token"):
         return RedirectResponse(f"/dashboard?shop={urllib.parse.quote(shop)}")
+
+    # If Shopify OAuth credentials are not configured yet, direct to Dashboard Setup
+    if not SHOPIFY_API_KEY or not SHOPIFY_API_SECRET:
+        return RedirectResponse(f"/dashboard/setup?shop={urllib.parse.quote(shop)}")
 
     return RedirectResponse(f"/auth?shop={urllib.parse.quote(shop)}")
 
@@ -131,12 +142,45 @@ def health():
 # Step 1: redirect to Shopify's permission screen
 # --------------------------------------------------------------------
 @router.get("/auth")
-def start_auth(shop: str):
+def start_auth(shop: str = ""):
+    if not shop:
+        return RedirectResponse("/dashboard")
+
     if not SHOPIFY_API_KEY or not SHOPIFY_API_SECRET or not APP_URL:
-        return PlainTextResponse(
-            "Missing required environment variables. Check SHOPIFY_API_KEY, "
-            "SHOPIFY_API_SECRET, and APP_URL (or HOST) on Render.",
-            status_code=500,
+        return HTMLResponse(
+            f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Configuration Required — RenderLink AI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; margin: 0; padding: 40px 16px; display: flex; justify-content: center; align-items: center; min-height: 100vh; box-sizing: border-box; }}
+        .card {{ background: white; border-radius: 16px; padding: 32px; max-width: 520px; width: 100%; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -2px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }}
+        h1 {{ font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 0; }}
+        p {{ font-size: 14px; color: #475569; line-height: 1.5; }}
+        .badge {{ display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #fef3c7; color: #92400e; margin-bottom: 16px; }}
+        .env-list {{ background: #f1f5f9; border-radius: 8px; padding: 12px 16px; font-family: monospace; font-size: 13px; color: #334155; margin: 16px 0; }}
+        .btn {{ display: block; text-align: center; background: #111827; color: white; text-decoration: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; font-size: 14px; margin-top: 20px; }}
+        .btn:hover {{ background: #1f2937; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <span class="badge">Store Configuration</span>
+        <h1>Shopify App Setup Required</h1>
+        <p>To connect seamlessly with <strong>{shop}</strong> via OAuth, set the following environment variables on your server (or in <code>.env</code>):</p>
+        <div class="env-list">
+            <div>SHOPIFY_API_KEY: {'[Configured]' if SHOPIFY_API_KEY else '[Missing]'}</div>
+            <div>SHOPIFY_API_SECRET: {'[Configured]' if SHOPIFY_API_SECRET else '[Missing]'}</div>
+            <div>APP_URL: {'[Configured]' if APP_URL else '[Missing]'}</div>
+        </div>
+        <p>You can also proceed directly to the store owner dashboard:</p>
+        <a class="btn" href="/dashboard/setup?shop={urllib.parse.quote(shop)}">Open Store Dashboard Setup</a>
+    </div>
+</body>
+</html>""",
+            status_code=200,
         )
 
     state = make_state(shop)

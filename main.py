@@ -12,6 +12,10 @@ project, before starting the app.
 """
 import os
 import re
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -43,11 +47,14 @@ app.add_middleware(
     allow_credentials=False,
 )
 
+_app_url = os.environ.get("APP_URL", "")
+_is_https = _app_url.startswith("https://") or os.environ.get("FORCE_HTTPS", "").lower() in ("1", "true") or os.environ.get("ENVIRONMENT") == "production"
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("SESSION_SECRET", "change-me-in-production"),
     same_site="lax",
-    https_only=True,
+    https_only=_is_https,
 )
 
 os.makedirs("static/uploads", exist_ok=True)
