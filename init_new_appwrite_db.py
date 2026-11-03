@@ -29,6 +29,12 @@ import time
 import argparse
 
 try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
     from appwrite.client import Client
     from appwrite.services.databases import Databases
     from appwrite.exception import AppwriteException
@@ -249,6 +255,38 @@ def main():
     client.set_key(api_key)
 
     databases = Databases(client)
+
+    # Ensure database exists
+    print(f"\n[0/3] Checking database '{db_id}'...")
+    try:
+        databases.get(database_id=db_id)
+        print(f"Database '{db_id}' found.")
+    except Exception as db_err:
+        print(f"Database '{db_id}' not found, creating...")
+        try:
+            databases.create(database_id=db_id, name="Store AI Agent")
+            print(f"Database '{db_id}' created successfully.")
+        except Exception as create_err:
+            print(f"Notice on database creation: {create_err}")
+
+    # Ensure widget icons bucket exists
+    bucket_id = os.environ.get("APPWRITE_WIDGET_ICONS_BUCKET", "widget_icons")
+    try:
+        from appwrite.services.storage import Storage
+        storage = Storage(client)
+        try:
+            storage.get_bucket(bucket_id=bucket_id)
+            print(f"Storage bucket '{bucket_id}' found.")
+        except Exception:
+            print(f"Creating storage bucket '{bucket_id}' for widget icons...")
+            try:
+                storage.create_bucket(bucket_id=bucket_id, name="Widget Icons")
+                print(f"Storage bucket '{bucket_id}' created.")
+            except Exception as b_err:
+                print(f"Notice on bucket creation: {b_err}")
+    except Exception:
+        pass
+
     create_all_collections(databases, db_id)
 
 
