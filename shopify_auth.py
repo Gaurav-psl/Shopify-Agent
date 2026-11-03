@@ -239,6 +239,8 @@ async def auth_callback(request: Request):
 
     store = repo.upsert_shop(shop, access_token, granted_scopes)
     repo.ensure_customization(store["$id"])
+    repo.ensure_features(store["$id"])
+    repo.ensure_store_info(store["$id"])
     is_new_store = not repo.has_dashboard_user(store["$id"])
 
     # Directly add widget script to the store upon app install
@@ -250,7 +252,7 @@ async def auth_callback(request: Request):
         print(f"[install callback] Widget script auto-install failed on {shop}: {e!r}")
 
     destination = (
-        f"/dashboard/signup?shop={urllib.parse.quote(shop)}"
+        f"/dashboard/setup?shop={urllib.parse.quote(shop)}"
         if is_new_store
         else f"/dashboard/login?shop={urllib.parse.quote(shop)}"
     )
