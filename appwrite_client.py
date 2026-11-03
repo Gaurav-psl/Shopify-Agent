@@ -159,6 +159,7 @@ try:
     from appwrite.services.databases import Databases
     from appwrite.services.storage import Storage
 
+    client = Client()
     _ep = os.environ.get("APPWRITE_ENDPOINT", "https://sgp.cloud.appwrite.io/v1")
     client.set_endpoint(_ep)
     client.set_project(os.environ.get("APPWRITE_PROJECT_ID", ""))
