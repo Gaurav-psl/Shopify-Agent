@@ -1,0 +1,4 @@
+{"tenant": "your-store.myshopify.com", "question": "how many days do I have to return an item?", "expect": ["refund_policy"]}
+{"tenant": "your-store.myshopify.com", "question": "रिफंड कितने दिन में मिलेगा", "expect": ["refund_policy"], "hints": {"language": "hi"}}
+{"tenant": "your-store.myshopify.com", "question": "do you ship to Canada?", "expect": ["shipping_policy"]}
+{"tenant": "your-store.myshopify.com", "question": "what is the capital of France?", "expect": []}

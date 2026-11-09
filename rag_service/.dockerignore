@@ -1,0 +1,6 @@
+.env
+qdrant_data
+tests
+eval
+backend_client
+__pycache__
